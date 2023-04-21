@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "1087562358202",
+    "project_id": "rosenbridge-360004",
+    "storage_bucket": "rosenbridge-360004.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1087562358202:android:48cec97b86d3cb0d9c5183",
+        "android_client_info": {
+          "package_name": "com.rosenbridge.rosen"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "1087562358202-24uth3kbopkunhlilfq40eq3p22mv125.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBOXbWrcUu-874O7NhqLiheT1oE0yAQGyA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "1087562358202-24uth3kbopkunhlilfq40eq3p22mv125.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

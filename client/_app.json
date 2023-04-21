@@ -1,0 +1,73 @@
+{
+  "expo": {
+    "version": "1.0.0",
+    "name": "Rosen",
+    "slug": "rosen",
+    "owner": "rosen-bridge",
+    "scheme": "com.rosenbridge.rosen",
+    "privacy": "hidden",
+    "sdkVersion": "46.0.0",
+    "orientation": "portrait",
+    "icon": "./src/assets/images/icon.png",
+    "userInterfaceStyle": "light",
+    "currentFullName": "@rosen-bridge/rosen",
+    "originalFullName": "@rosen-bridge/rosen",
+    "splash": {
+      "image": "./src/assets/images/splash.png",
+      "resizeMode": "cover",
+      "backgroundColor": "#000000"
+    },
+    "updates": {
+      "fallbackToCacheTimeout": 0,
+      "url": "https://u.expo.dev/b15def6e-7ff3-4424-8fe0-33e5cc3bd47d"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "The app accesses your photos to let you share them with your friends."
+        }
+      ]
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "config": {
+        "googleMapsApiKey": "AIzaSyARru1kWpB13GpFuItu6Jc05S3Hlf1020U"
+      },
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "location",
+          "fetch"
+        ],
+        "NSLocationAlwaysUsageDescription": "App requires geolocation to improve the quality of the service",
+        "NSLocationWhenInUseUsageDescription": "App requires geolocation to improve the quality of the service",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "App requires geolocation to improve the quality of the service",
+        "NSLocationDefaultAccuracyReduced": false
+      },
+      "bundleIdentifier": "com.rosenbridge.rosen"
+    },
+    "android": {
+      "googleServicesFile": "./google-services.json",
+      "permissions": [
+        "ACCESS_BACKGROUND_LOCATION",
+        "android.permission.RECORD_AUDIO"
+      ],
+      "adaptiveIcon": {
+        "foregroundImage": "./src/assets/images/adaptive-icon.png",
+        "backgroundColor": "#FFFFFF"
+      },
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyARru1kWpB13GpFuItu6Jc05S3Hlf1020U"
+        }
+      },
+      "package": "com.rosenbridge.rosen"
+    },
+    "runtimeVersion": {
+      "policy": "sdkVersion"
+    }
+  }
+}

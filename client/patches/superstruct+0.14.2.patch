@@ -1,0 +1,4 @@
+diff --git a/node_modules/superstruct/lib/index.cjs b/node_modules/superstruct/lib/index.cjs.js
+similarity index 100%
+rename from node_modules/superstruct/lib/index.cjs
+rename to node_modules/superstruct/lib/index.cjs.js
