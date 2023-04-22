@@ -1,0 +1,117 @@
+db:
+  driver: mysql
+  conn_str: 'root:root@tcp(127.0.0.1:3306)/rosen?charset=utf8mb4&parseTime=True&loc=Local'
+
+token:
+  token_life: 1h
+  refresh_token_life: 24h
+
+redis:
+  host: 127.0.0.1
+  port: 6379
+  password: 1111
+  db: 7
+
+content:
+  remote_prefix: http://localhost/oss/
+
+cors:
+  enable: false
+  allow_origins:
+    - '*'
+  allow_headers: '*'
+
+oss:
+  type: s3
+  endpoint: localhost
+  accessKeyId: key
+  accessKeySecret: secret
+  bucket: 'bucket'
+  region: 'local'
+  ssl: true
+  presignedDuration: 7200
+
+web:
+  sessionToken: 8d0c8f9d1a9539021fda006427b993b9
+  capichaFont: 'comic.ttf'
+
+modules: '*'
+
+rosen:
+  vcode: true
+  solana:
+    endpoint: https://api.mainnet-beta.solana.com
+    funder: private-key 
+    unlockPhrase:
+    rateLimit: 25
+  mte:
+    keepalive: 1024
+  energy:
+    decimals: 2
+  wallet:
+    defaultToken:
+      name: usdt
+      chain: solana
+      contractAddress: Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB
+      autoCreate: false
+      decimals: 6
+  ipfs:
+    rpc: localhost:5001
+    gateway: https://www.gorosen.xyz/ipfs
+  coin:
+    name: usdt
+    decimals: 9
+  chains:
+    - name: solana
+      endpoint: https://api.mainnet-beta.solana.com
+      funder: private-key  
+      rateLimit: 50
+      unlockPhrase:
+      defaultToken:
+        name: usdt
+        contractAddress: Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB
+        autoCreate: false
+        decimals: 9        
+      defaultNFT:
+        name: ROSEN
+        contractAddress: 
+    - name: bnb
+      endpoint: https://data-seed-prebsc-1-s1.binance.org:8545/
+      funder: private-key 
+      unlockPhrase:
+      gasPrice: 30000000000
+      defaultToken:
+        name: usdt
+        contractAddress: 0x55d398326f99059fF775485246999027B3197955
+        autoCreate: false
+        decimals: 18
+      defaultNFT:
+        name: ROSEN
+        contractAddress: 0x27f14ea24c9b76b0721a41a97f7eebc297223be5
+    - name: okc
+      endpoint: https://exchaintestrpc.okex.org/
+      funder: private-key  
+      unlockPhrase:
+      gasPrice: 30000000000
+      defaultToken:
+        name: usdt
+        contractAddress: 0xA9f8eA7632eA390BE414790b239AB7D3DF98b143
+        autoCreate: false
+        decimals: 18
+      defaultNFT:
+        name: ROSEN
+        contractAddress: 0x27f14Ea24C9B76b0721A41a97f7Eebc297223Be5
+    - name: polygon
+      endpoint: https://rpc-mumbai.maticvigil.com/
+      funder: private-key 
+      unlockPhrase:
+      gasPrice: 30000000000
+      defaultToken:
+        name: usdt
+        contractAddress: 0x2d7882beDcbfDDce29Ba99965dd3cdF7fcB10A1e
+        autoCreate: false
+        decimals: 18
+      defaultNFT:
+        name: ROSEN
+        contractAddress: 0x27f14Ea24C9B76b0721A41a97f7Eebc297223Be5
+      
