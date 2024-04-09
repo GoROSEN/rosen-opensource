@@ -4,8 +4,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/GoROSEN/rosen-opensource/server-contract/business/mall"
-	"github.com/GoROSEN/rosen-opensource/server-contract/core/utils"
+	"github.com/GoROSEN/rosen-apiserver/business/mall"
+	"github.com/GoROSEN/rosen-apiserver/core/utils"
 	"github.com/gin-gonic/gin"
 	"github.com/google/martian/log"
 )
@@ -39,14 +39,29 @@ func (c *Controller) setupAssetController(r *gin.RouterGroup) {
 		// memberId := ctx.GetInt("member-id")
 		c.GetModelCvt(ctx, &Asset{}, &AssetVO{}, []string{}, c.asset2AssetVo)
 	})
+	r.GET("/assets/others-equips/:id", func(ctx *gin.Context) {
+		memberId, _ := strconv.Atoi(ctx.Param("id"))
+		availableOnly, _ := strconv.ParseBool(ctx.Query("available_only"))
+
+		if memberId == 0 {
+			utils.SendFailureResponse(ctx, 400, "message.common.system-error")
+			return
+		}
+
+		if availableOnly {
+			c.ListAll(ctx, &[]Asset{}, &[]EquipAssetVO{}, &Asset{}, nil, nil, assetList2EquipAssetVoList, "id asc", "type = 1 and owner_id = ? and count > 0 and (due_to = 0 or due_to > ?)", memberId, time.Now().Unix())
+		} else {
+			c.ListAll(ctx, &[]Asset{}, &[]EquipAssetVO{}, &Asset{}, nil, nil, assetList2EquipAssetVoList, "id asc", "type = 1 and owner_id = ?", memberId)
+		}
+	})
 	r.GET("/assets/producer-equips/:page", func(ctx *gin.Context) {
 		memberId := ctx.GetInt("member-id")
 		availableOnly, _ := strconv.ParseBool(ctx.Query("available_only"))
 
 		if availableOnly {
-			c.PageFull(ctx, &[]Asset{}, &[]EquipAssetVO{}, &Asset{}, nil, nil, assetList2EquipAssetVoList, "image asc", "type = 1 and owner_id = ? and count > 0 and (due_to = 0 or due_to > ?)", memberId, time.Now().Unix())
+			c.PageFull(ctx, &[]Asset{}, &[]EquipAssetVO{}, &Asset{}, nil, nil, assetList2EquipAssetVoList, "id asc", "type = 1 and owner_id = ? and count > 0 and (due_to = 0 or due_to > ?)", memberId, time.Now().Unix())
 		} else {
-			c.PageFull(ctx, &[]Asset{}, &[]EquipAssetVO{}, &Asset{}, nil, nil, assetList2EquipAssetVoList, "image asc", "type = 1 and owner_id = ?", memberId)
+			c.PageFull(ctx, &[]Asset{}, &[]EquipAssetVO{}, &Asset{}, nil, nil, assetList2EquipAssetVoList, "id asc", "type = 1 and owner_id = ?", memberId)
 		}
 	})
 	r.GET("/assets/producer-current-equip", func(ctx *gin.Context) {
@@ -63,8 +78,25 @@ func (c *Controller) setupAssetController(r *gin.RouterGroup) {
 			utils.SendSuccessResponse(ctx, gin.H{})
 			return
 		}
-		var equip *EquipAssetVO
-		equip = asset2EquipAssetVo(&asset).(*EquipAssetVO)
+		equip := asset2EquipAssetVo(&asset).(*EquipAssetVO)
+		utils.SendSuccessResponse(ctx, equip)
+	})
+	r.GET("/assets/equip/:id", func(ctx *gin.Context) {
+		// memberId := ctx.GetInt("member-id")
+		vimgID := ctx.Param("id")
+		val, err := strconv.Atoi(vimgID)
+		if err != nil {
+			log.Errorf("cannot convert equip id (%v) to int: %v", vimgID, err)
+			utils.SendFailureResponse(ctx, 400, "message.common.system-error")
+			return
+		}
+		var asset Asset
+		if err := c.Crud.GetModelByID(&asset, uint(val)); err != nil {
+			log.Errorf("cannot get asset with asset id (%v): %v", val, err)
+			utils.SendSuccessResponse(ctx, gin.H{})
+			return
+		}
+		equip := asset2EquipAssetVo(&asset).(*EquipAssetVO)
 		utils.SendSuccessResponse(ctx, equip)
 	})
 	r.POST("/assets/producer-equip/activate/:id", c.activateProducerEquip)
@@ -101,7 +133,7 @@ func (c *Controller) activateProducerEquip(ctx *gin.Context) {
 		return
 	}
 	member.VirtualImageID = uint(val)
-	if err := c.Crud.SaveModel(&member); err != nil {
+	if err := c.Crud.SaveModelOpt(&member, []string{}, []string{"CurrentEquip", "Member", "Wallets", "Assets"}); err != nil {
 		log.Errorf("cannot save member extra info: %v", err)
 		utils.SendFailureResponse(ctx, 500, "message.common.system-error")
 		return
@@ -177,11 +209,20 @@ func (c *Controller) orderMallEquip(ctx *gin.Context) {
 		utils.SendFailureResponse(ctx, 400, "message.common.system-error")
 		return
 	}
+	coinType := ctx.Query("type")
 
+	// 检查商品信息
 	var good *mall.Good
-	if good, err = c.mallService.GetGoodByID(uint(productId)); err != nil {
+	if good, err = c.mallService.GetFullGoodByID(uint(productId)); err != nil {
 		log.Errorf("cannot get good by id: %v", err)
 		utils.SendFailureResponse(ctx, 500, "message.common.system-error")
+		return
+	}
+
+	// 商品是否在售
+	if !good.OnSale {
+		log.Errorf("good is not for sale")
+		utils.SendFailureResponse(ctx, 500, "message.assets.not-start")
 		return
 	}
 
@@ -191,6 +232,7 @@ func (c *Controller) orderMallEquip(ctx *gin.Context) {
 		return
 	}
 
+	// 检查限购规则
 	if good.LimitPerOrder == 0 {
 		log.Infof("check LimitPerOrder = %v", good.LimitPerOrder)
 		// 这个接口每次只买一件，所以只要判断每单限购是否为0
@@ -214,19 +256,14 @@ func (c *Controller) orderMallEquip(ctx *gin.Context) {
 		}
 	}
 
-	var gd *mall.GoodDetail
-	if gd, err = c.mallService.GetDetailByGoodID(uint(productId)); err != nil {
-		log.Errorf("cannot get good detail by id: %v", err)
-		utils.SendFailureResponse(ctx, 500, "message.common.system-error")
-		return
-	}
-
-	if err := c.service.OrderMallEquip(memberId, params.Chain, good, gd); err != nil {
+	// 执行下单和自动发货
+	if err := c.service.OrderMallEquip(memberId, params.Chain, coinType, good); err != nil {
 		log.Errorf("cannot order equip: %v", err)
 		utils.SendFailureResponse(ctx, 500, err.Error())
 		return
 	}
 
+	// 保存订单
 	order := &mall.Order{}
 	order.CustomerID = uint(memberId)
 	order.Status = 5

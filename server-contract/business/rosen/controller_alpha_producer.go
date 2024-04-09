@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/GoROSEN/rosen-opensource/server-contract/core/config"
-	"github.com/GoROSEN/rosen-opensource/server-contract/core/utils"
+	"github.com/GoROSEN/rosen-apiserver/core/config"
+	"github.com/GoROSEN/rosen-apiserver/core/utils"
 	"github.com/gin-gonic/gin"
 	"github.com/gofrs/uuid"
 	"github.com/google/martian/log"
@@ -154,7 +154,7 @@ func (c *Controller) mintNFT(ctx *gin.Context) {
 		return
 	}
 	var plot Plot
-	if err := c.Crud.GetPreloadModelByID(&plot, uint(plotId), []string{"Blazer", "Blazer.Member"}); err != nil {
+	if err := c.Crud.GetPreloadModelByID(&plot, uint(plotId), []string{"Blazer", "Blazer.Member", "CoBlazer", "CoBlazer.Member"}); err != nil {
 		log.Errorf("cannot get plot: %v", err)
 		utils.SendFailureResponse(ctx, 500, "message.plot.plot-not-found")
 		return
@@ -237,13 +237,22 @@ func (c *Controller) mintNFT(ctx *gin.Context) {
 		utils.SendFailureResponse(ctx, 500, "message.mint.mint-nft-error")
 		return
 	}
-	if plot.CoBlazerID > 0 {
-		c.SendMessage(plot.CoBlazerID, "info-incoming-mint", "en_US", extra.Member.DisplayName, count, plot.Name, income*plot.CoBlazerShare)
-		c.SendMessage(plot.BlazerID, "info-incoming-mint", "en_US", extra.Member.DisplayName, count, plot.Name, income*(1.0-plot.CoBlazerShare))
-	} else {
-		c.SendMessage(plot.BlazerID, "info-incoming-mint", "en_US", extra.Member.DisplayName, count, plot.Name, income)
+	msgParams := map[string]interface{}{
+		"ProducerName": extra.Member.DisplayName,
+		"MintCount":    count,
+		"PlotName":     plot.Name,
+		"MintCost":     plot.MintPrice * uint64(count),
+		"BlazerIncome": income,
 	}
-	c.SendSysMessage(uint(memberId), "info-mint-success", "en_US", count, plot.MintPrice*uint64(count))
+	if plot.CoBlazerID > 0 {
+		msgParams["BlazerIncome"] = income * plot.CoBlazerShare
+		c.SendMessage(plot.CoBlazerID, "info-incoming-mint", plot.CoBlazer.Member.Language, msgParams)
+		msgParams["BlazerIncome"] = income * (1.0 - plot.CoBlazerShare)
+		c.SendMessage(plot.BlazerID, "info-incoming-mint", plot.Blazer.Member.Language, msgParams)
+	} else {
+		c.SendMessage(plot.BlazerID, "info-incoming-mint", plot.Blazer.Member.Language, msgParams)
+	}
+	c.SendSysMessage(uint(memberId), "info-mint-success", extra.Member.Language, msgParams)
 
 	utils.SendSuccessMsgResponse(ctx, "message.mint.mint-nft-success", nil)
 }
@@ -292,7 +301,7 @@ func (c *Controller) mintNFTJson(ctx *gin.Context) {
 		return
 	}
 	var plot Plot
-	if err := c.Crud.GetPreloadModelByID(&plot, uint(plotId), []string{"Blazer", "Blazer.Member"}); err != nil {
+	if err := c.Crud.GetPreloadModelByID(&plot, uint(plotId), []string{"Blazer", "Blazer.Member", "CoBlazer", "CoBlazer.Member"}); err != nil {
 		log.Errorf("cannot get plot: %v", err)
 		utils.SendFailureResponse(ctx, 500, "message.plot.plot-not-found")
 		return
@@ -373,13 +382,22 @@ func (c *Controller) mintNFTJson(ctx *gin.Context) {
 		utils.SendFailureResponse(ctx, 500, "message.mint.mint-nft-error")
 		return
 	} else {
-		if plot.CoBlazerID > 0 {
-			c.SendMessage(plot.CoBlazerID, "info-incoming-mint", "en_US", extra.Member.DisplayName, count, plot.Name, income*plot.CoBlazerShare)
-			c.SendMessage(plot.BlazerID, "info-incoming-mint", "en_US", extra.Member.DisplayName, count, plot.Name, income*(1.0-plot.CoBlazerShare))
-		} else {
-			c.SendMessage(plot.BlazerID, "info-incoming-mint", "en_US", extra.Member.DisplayName, count, plot.Name, income)
+		msgParams := map[string]interface{}{
+			"ProducerName": extra.Member.DisplayName,
+			"MintCount":    count,
+			"PlotName":     plot.Name,
+			"MintCost":     plot.MintPrice * uint64(count),
+			"BlazerIncome": income,
 		}
-		c.SendSysMessage(uint(memberId), "info-mint-success", "en_US", count, plot.MintPrice*uint64(count))
+		if plot.CoBlazerID > 0 {
+			msgParams["BlazerIncome"] = income * plot.CoBlazerShare
+			c.SendMessage(plot.CoBlazerID, "info-incoming-mint", plot.CoBlazer.Member.Language, msgParams)
+			msgParams["BlazerIncome"] = income * (1.0 - plot.CoBlazerShare)
+			c.SendMessage(plot.BlazerID, "info-incoming-mint", plot.Blazer.Member.Language, msgParams)
+		} else {
+			c.SendMessage(plot.BlazerID, "info-incoming-mint", plot.Blazer.Member.Language, msgParams)
+		}
+		c.SendSysMessage(uint(memberId), "info-mint-success", extra.Member.Language, msgParams)
 	}
 
 	utils.SendSuccessMsgResponse(ctx, "message.mint.mint-nft-success", nil)

@@ -7,9 +7,9 @@ import (
 	"math/big"
 	"strings"
 
-	erc20 "github.com/GoROSEN/rosen-opensource/server-contract/core/blockchain/contracts_erc20"
-	erc721 "github.com/GoROSEN/rosen-opensource/server-contract/core/blockchain/contracts_erc721"
-	"github.com/GoROSEN/rosen-opensource/server-contract/core/config"
+	erc20 "github.com/GoROSEN/rosen-apiserver/core/blockchain/contracts_erc20"
+	erc721 "github.com/GoROSEN/rosen-apiserver/core/blockchain/contracts_erc721"
+	"github.com/GoROSEN/rosen-apiserver/core/config"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -104,7 +104,17 @@ func (sca *GethChainAccess) TransferToken(from, to string, value *big.Int, contr
 		log.Errorf("cannot attach contract: %v", err)
 		return "", err
 	}
-	tx, err := token.Transfer(bind.NewKeyedTransactor(privateKey), toAddress, value)
+	chainID, err := sca.client.NetworkID(context.Background())
+	if err != nil {
+		log.Errorf("cannot get chain id: %v", err)
+		return "", err
+	}
+	opts, err := bind.NewKeyedTransactorWithChainID(privateKey, chainID)
+	if err != nil {
+		log.Errorf("cannot create trasactor: %v", err)
+		return "", err
+	}
+	tx, err := token.Transfer(opts, toAddress, value)
 	if err != nil {
 		log.Errorf("cannot create transaction: %v", err)
 		return "", err
@@ -126,8 +136,17 @@ func (sca *GethChainAccess) MintNFT(to string, contractAddress string, tokenId u
 		log.Errorf("cannot attach contract: %v", err)
 		return "", err
 	}
-
-	tx, err := token.Mint(bind.NewKeyedTransactor(privateKey), toAddress, big.NewInt(int64(tokenId)), tokenUri)
+	chainID, err := sca.client.NetworkID(context.Background())
+	if err != nil {
+		log.Errorf("cannot get chain id: %v", err)
+		return "", err
+	}
+	opts, err := bind.NewKeyedTransactorWithChainID(privateKey, chainID)
+	if err != nil {
+		log.Errorf("cannot create trasactor: %v", err)
+		return "", err
+	}
+	tx, err := token.Mint(opts, toAddress, big.NewInt(int64(tokenId)), tokenUri)
 	if err != nil {
 		log.Errorf("cannot create transaction: %v", err)
 		return "", err
@@ -155,8 +174,17 @@ func (sca *GethChainAccess) TransferNFT(from, to string, contractAddress string,
 		log.Errorf("cannot attach contract: %v", err)
 		return "", err
 	}
-
-	tx, err := token.SafeTransferFrom(bind.NewKeyedTransactor(privateKey), fromAddress, toAddress, big.NewInt(int64(tokenId)))
+	chainID, err := sca.client.NetworkID(context.Background())
+	if err != nil {
+		log.Errorf("cannot get chain id: %v", err)
+		return "", err
+	}
+	opts, err := bind.NewKeyedTransactorWithChainID(privateKey, chainID)
+	if err != nil {
+		log.Errorf("cannot create trasactor: %v", err)
+		return "", err
+	}
+	tx, err := token.SafeTransferFrom(opts, fromAddress, toAddress, big.NewInt(int64(tokenId)))
 	if err != nil {
 		log.Errorf("cannot create transaction: %v", err)
 		return "", err
@@ -195,11 +223,7 @@ func (sca *GethChainAccess) signAndSendTx(privateKey *ecdsa.PrivateKey, toAddres
 		gasPrice = big.NewInt(int64(sca.cfg.GasPrice)) // 30 gwei
 	}
 	tx := types.NewTransaction(nonce, *toAddress, value, gasLimit, gasPrice, data)
-	chainID, err := sca.client.NetworkID(context.Background())
-	if err != nil {
-		log.Errorf("cannot get chain id: %v", err)
-		return "", err
-	}
+	chainID := sca.chainId()
 	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(chainID), privateKey)
 	if err != nil {
 		log.Errorf("cannot sign tx: %v", err)
@@ -211,4 +235,28 @@ func (sca *GethChainAccess) signAndSendTx(privateKey *ecdsa.PrivateKey, toAddres
 		return "", err
 	}
 	return signedTx.Hash().Hex(), nil
+}
+
+func (sca *GethChainAccess) chainId() *big.Int {
+	if sca.cfg.ChainId == 0 {
+		chainID, err := sca.client.NetworkID(context.Background())
+		if err != nil {
+			log.Errorf("cannot get chain id: %v", err)
+		}
+		return chainID
+	} else {
+		return big.NewInt(sca.cfg.ChainId)
+	}
+}
+
+func (sca *GethChainAccess) ConfirmTransaction(txhash string) (bool, error) {
+	_, pending, err := sca.client.TransactionByHash(context.Background(), common.HexToHash(txhash))
+	if err != nil {
+		return false, err
+	}
+	if pending {
+		return false, nil
+	} else {
+		return true, nil
+	}
 }

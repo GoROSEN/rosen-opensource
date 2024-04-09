@@ -1,8 +1,8 @@
 package rosen
 
 import (
-	"github.com/GoROSEN/rosen-opensource/server-contract/core/blockchain"
-	"github.com/GoROSEN/rosen-opensource/server-contract/core/config"
+	"github.com/GoROSEN/rosen-apiserver/core/blockchain"
+	"github.com/GoROSEN/rosen-apiserver/core/config"
 	"github.com/google/martian/log"
 	"gorm.io/gorm"
 )
@@ -24,7 +24,7 @@ func MigrateDataV1(db *gorm.DB) error {
 		var bc blockchain.BlockChainAccess
 		if c.Name == "solana" {
 			bc, _ = blockchain.NewSolanaChainAccess(c)
-		} else if c.Name == "bnb" {
+		} else if c.Name == "bnb" || c.Name == "okc" || c.Name == "polygon" {
 			bc, _ = blockchain.NewGethChainAccess(c)
 		}
 		accessors[c.Name] = bc

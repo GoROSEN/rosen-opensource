@@ -4,8 +4,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/GoROSEN/rosen-opensource/server-contract/core/utils"
-	"github.com/GoROSEN/rosen-opensource/server-contract/features/member"
+	"github.com/GoROSEN/rosen-apiserver/core/config"
+	"github.com/GoROSEN/rosen-apiserver/core/utils"
+	"github.com/GoROSEN/rosen-apiserver/features/member"
 	"github.com/gin-gonic/gin"
 	"github.com/google/martian/log"
 	"github.com/jinzhu/copier"
@@ -14,7 +15,8 @@ import (
 // setupMemberAlphaController 初始化控制器
 func (c *Controller) setupMemberAlphaController(r *gin.RouterGroup) {
 
-	r.POST("/plot/:id", c.editPlot)
+	r.POST("/plot-mint-price/:id", c.editPlotMintPrice)
+	r.POST("/plot/:id", c.editPlotBanner)
 	r.GET("/member/:id/info", c.getRosenMemberInfo)
 	r.GET("/member/:id/plots", c.getRosenMemberPlots)
 	r.GET("/member/:id/galleries", c.getRosenMemberGalleries)
@@ -34,9 +36,54 @@ func (c *Controller) setupMemberAlphaController(r *gin.RouterGroup) {
 	r.POST("/blazer/listing/:plotId", c.listingPlot)
 	r.POST("/blazer/unlisting/:listingId", c.unlistingPlot)
 	r.POST("/blazer/set-coblazer", c.setCoBlazer)
+	r.GET("/chat/fee", c.chatFee) // 历史遗留，如果要删掉，得同步修改app、ws服务和rpc相关内容
 }
 
-func (c *Controller) editPlot(ctx *gin.Context) {
+func (c *Controller) editPlotMintPrice(ctx *gin.Context) {
+
+	plotId, err := strconv.Atoi(ctx.Param("id"))
+	if err != nil {
+		log.Errorf("cannot get plot id: %v", err)
+		utils.SendFailureResponse(ctx, 400, "message.common.system-error")
+		return
+	}
+	memberId := ctx.GetInt("member-id")
+	var vo struct {
+		MintPrice float64 `json:"mintPrice"`
+	}
+	if err := ctx.ShouldBind(&vo); err != nil {
+		log.Errorf("cannot parse data: %v", err)
+		utils.SendFailureResponse(ctx, 400, "message.common.system-error")
+		return
+	}
+
+	var plot Plot
+	if err := c.Crud.GetModelByID(&plot, uint(plotId)); err != nil {
+		log.Errorf("cannot get plot: %v", err)
+		utils.SendFailureResponse(ctx, 500, "message.common.system-error")
+		return
+	}
+
+	if plot.BlazerID != uint(memberId) {
+		utils.SendFailureResponse(ctx, 500, "message.common.privilege-error")
+		return
+	}
+
+	if vo.MintPrice < float64(plot.MinMintPrice) || vo.MintPrice > float64(plot.MaxMintPrice) {
+		utils.SendFailureResponse(ctx, 500, "message.common.system-error")
+		return
+	}
+
+	if err := c.service.Db.Model(&plot).Updates(&Plot{MintPrice: uint64(vo.MintPrice)}).Error; err != nil {
+		log.Errorf("update banner failed: %v", err)
+		utils.SendFailureResponse(ctx, 500, "message.plot.plot-save-error")
+		return
+	}
+
+	utils.SendSuccessMsgResponse(ctx, "message.plot.plot-updated", nil)
+}
+
+func (c *Controller) editPlotBanner(ctx *gin.Context) {
 
 	plotId, err := strconv.Atoi(ctx.Param("id"))
 	if err != nil {
@@ -54,17 +101,24 @@ func (c *Controller) editPlot(ctx *gin.Context) {
 		return
 	}
 
-	if !c.service.checkPlotOwner(uint(plotId), uint(memberId)) {
+	var plot Plot
+	if err := c.Crud.GetModelByID(&plot, uint(plotId)); err != nil {
+		log.Errorf("cannot get plot: %v", err)
+		utils.SendFailureResponse(ctx, 500, "message.common.system-error")
+		return
+	}
+
+	if plot.BlazerID != uint(memberId) {
 		utils.SendFailureResponse(ctx, 500, "message.common.privilege-error")
 		return
 	}
-	var plot Plot
-	plot.ID = uint(plotId)
-	if err := c.service.Db.Model(&plot).Update("banner", vo.Banner).Error; err != nil {
+
+	if err := c.service.Db.Model(&plot).Updates(&Plot{Banner: vo.Banner}).Error; err != nil {
 		log.Errorf("update banner failed: %v", err)
 		utils.SendFailureResponse(ctx, 500, "message.plot.plot-save-error")
 		return
 	}
+
 	utils.SendSuccessMsgResponse(ctx, "message.plot.plot-updated", nil)
 }
 
@@ -191,12 +245,22 @@ func (c *Controller) occupyPlot(ctx *gin.Context) {
 	// 二手空地需要有在此地块mint记录才能花rosen占领
 	memberId := ctx.GetInt("member-id")
 	plotId, err := strconv.Atoi(ctx.Param("id"))
+	coinType := ctx.Query("type")
 	if err != nil {
 		log.Errorf("cannot convert plot id: %v", err)
 		utils.SendFailureResponse(ctx, 400, "message.common.system-error")
 		return
 	}
-	if err := c.service.OccupyPlot(uint(plotId), uint(memberId)); err != nil {
+
+	var coin *config.RosenCoinConfig
+
+	if coinType == "gem" {
+		coin = &config.GetConfig().Rosen.Coin2
+	} else {
+		coin = &config.GetConfig().Rosen.Coin
+	}
+
+	if err := c.service.OccupyPlot(uint(plotId), uint(memberId), coin); err != nil {
 
 		log.Errorf("cannot cccupy plot: %v", err)
 		utils.SendFailureResponse(ctx, 501, err.Error())
@@ -232,9 +296,13 @@ func (c *Controller) getRosenMemberInfo(ctx *gin.Context) {
 		Follower  bool `json:"follower"`
 		Following bool `json:"following"`
 	}
-	tvo := c.composeRosenMemberFullVO(&extra, &sns, nil, nil)
+	tvo := c.composeRosenMemberFullVO(&extra, &sns, nil, nil, nil)
 	tvo.UserName = "***"
-	tvo.Email = "***"
+	if len(tvo.Email) > 5 {
+		tvo.Email = tvo.Email[0:1] + "***" + tvo.Email[len(tvo.Email)-4:len(tvo.Email)]
+	} else {
+		tvo.Email = "***"
+	}
 	copier.Copy(&vo, tvo)
 
 	me := &member.Member{}
@@ -439,7 +507,17 @@ func (c *Controller) buyListingPlot(ctx *gin.Context) {
 		utils.SendFailureResponse(ctx, 501, err.Error())
 		return
 	} else {
-		c.SendMessage(listing.BlazerID, "info-plot-sold", "en_US", listing.Plot.Name, income)
+		var member member.Member
+		msgPrams := map[string]interface{}{
+			"PlotName": listing.Plot.Name,
+			"Income":   income,
+		}
+		if err = c.service.GetModelByID(&member, uint(listing.BlazerID)); err != nil {
+			log.Infof("cannot find member: %v", err)
+			c.SendMessage(listing.BlazerID, "info-plot-sold", "en-US", msgPrams)
+		} else {
+			c.SendMessage(listing.BlazerID, "info-plot-sold", member.Language, msgPrams)
+		}
 	}
 
 	utils.SendSuccessMsgResponse(ctx, "message.market.listing-bought", nil)
@@ -466,4 +544,19 @@ func (c *Controller) setCoBlazer(ctx *gin.Context) {
 	}
 
 	utils.SendSimpleSuccessResponse(ctx)
+}
+
+func (c *Controller) chatFee(ctx *gin.Context) {
+	memberId := ctx.GetInt("member-id")
+	toUserId, err := strconv.Atoi(ctx.Query("toUserId"))
+	if err != nil {
+		utils.SendFailureResponse(ctx, 400, "message.common.system-error")
+		return
+	}
+
+	userFee, SysFee := c.service.EstimateChatFee(uint(memberId), uint(toUserId))
+
+	utils.SendSuccessResponse(ctx, gin.H{
+		"cost": (userFee + SysFee) / 100.0,
+	})
 }

@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/GoROSEN/rosen-opensource/server-contract/core/config"
+	"github.com/GoROSEN/rosen-apiserver/core/config"
 	solana "github.com/gagliardetto/solana-go"
 	associatedtokenaccount "github.com/gagliardetto/solana-go/programs/associated-token-account"
 	"github.com/gagliardetto/solana-go/programs/token"
@@ -343,4 +343,25 @@ func (sca *SolanaChainAccess) FindTokenAccount(contractAddress string, walletAdd
 		return "", err
 	}
 	return fromTokenAccount.String(), nil
+}
+
+func (sca *SolanaChainAccess) ConfirmTransaction(txhash string) (bool, error) {
+	ctx := context.TODO()
+	sig, err := solana.SignatureFromBase58(txhash)
+	if err != nil {
+		log.Errorf("cannot get signature from %v: %v", txhash, err)
+		return false, err
+	}
+	result, err := sca.rpcClient.GetTransaction(ctx, sig, nil)
+	if err != nil {
+		if err == rpc.ErrNotFound {
+			return false, nil
+		}
+		log.Errorf("get transaction error for %v: %v", txhash, err)
+		return false, err
+	}
+	if result == nil {
+		return false, nil
+	}
+	return true, nil
 }

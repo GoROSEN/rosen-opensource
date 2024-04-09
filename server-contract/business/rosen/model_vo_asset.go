@@ -60,11 +60,12 @@ type WalletVO struct {
 	}
 */
 type SuitGoodVO struct {
-	ImgIpfsUrl string  `json:"imgIpfsUrl"`
-	Life       int64   `json:"life"`
-	Duration   string  `json:"duration"`
-	EarnRate   float64 `json:"earnRate"`
-	Level      int     `json:"level"`
+	ImgIpfsUrl  string  `json:"imgIpfsUrl"`
+	Life        int64   `json:"life"`
+	Duration    string  `json:"duration"`
+	EarnRate    float64 `json:"earnRate"`
+	Level       int     `json:"level"`
+	DisableMint bool    `json:"disableMint"`
 }
 
 type SuitParamsVO struct {
@@ -72,6 +73,13 @@ type SuitParamsVO struct {
 	AvatarFrame string `json:"avatar"`
 	Image       string `json:"image"`
 	SuitImage   string `json:"suitImage"`
+}
+
+type CollectionVO struct {
+	MintAccount          string `json:"mint"`
+	TokenAccount         string `json:"tokenAccount"`
+	MetadataAccount      string `json:"metadataAccount"`
+	MasterEditionAccount string `json:"masterEditionAccount"`
 }
 
 func asset2EquipAssetVo(d interface{}) interface{} {

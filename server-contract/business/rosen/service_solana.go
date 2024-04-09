@@ -2,21 +2,35 @@ package rosen
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
-	"github.com/GoROSEN/rosen-opensource/server-contract/core/config"
+	"github.com/GoROSEN/rosen-apiserver/core/config"
+	"github.com/go-resty/resty/v2"
 	"github.com/google/martian/log"
 	"github.com/mr-tron/base58"
-	"github.com/portto/solana-go-sdk/client"
-	"github.com/portto/solana-go-sdk/common"
-	solana "github.com/portto/solana-go-sdk/common"
-	"github.com/portto/solana-go-sdk/pkg/pointer"
-	"github.com/portto/solana-go-sdk/program/associated_token_account"
-	"github.com/portto/solana-go-sdk/program/metaplex/token_metadata"
-	"github.com/portto/solana-go-sdk/program/system"
-	"github.com/portto/solana-go-sdk/program/token"
-	"github.com/portto/solana-go-sdk/types"
+	"github.com/yosefl20/solana-go-sdk/client"
+	"github.com/yosefl20/solana-go-sdk/common"
+	solana "github.com/yosefl20/solana-go-sdk/common"
+	"github.com/yosefl20/solana-go-sdk/pkg/pointer"
+	"github.com/yosefl20/solana-go-sdk/program/associated_token_account"
+	"github.com/yosefl20/solana-go-sdk/program/metaplex/token_metadata"
+	"github.com/yosefl20/solana-go-sdk/program/system"
+	"github.com/yosefl20/solana-go-sdk/program/token"
+	"github.com/yosefl20/solana-go-sdk/types"
 )
+
+func (s *Service) getSolanaChainConfig() *config.BlockchainConfig {
+	cfg := config.GetConfig()
+	var chainCfg *config.BlockchainConfig
+	for i := range cfg.Rosen.Chains {
+		if cfg.Rosen.Chains[i].Name == "solana" {
+			chainCfg = &cfg.Rosen.Chains[i]
+			break
+		}
+	}
+	return chainCfg
+}
 
 func (s *Service) createAssociatedTokenAccount(wallet *types.Account, mintAddress string, autoCreate bool) (string, error) {
 
@@ -75,9 +89,9 @@ func (s *Service) createAssociatedTokenAccount(wallet *types.Account, mintAddres
 
 func (s *Service) mintSolanaNFT(toAddress string, asset *Asset, fileUrl string) (string, error) {
 
-	cfg := config.GetConfig()
-	var feePayer, _ = types.AccountFromBase58(cfg.Rosen.Chains[0].Funder)
-	c := client.NewClient(cfg.Rosen.Chains[0].Endpoint)
+	chainCfg := s.getSolanaChainConfig()
+	var feePayer, _ = types.AccountFromBase58(chainCfg.Funder)
+	c := client.NewClient(chainCfg.Endpoint)
 
 	toAccountPublic := solana.PublicKeyFromString(toAddress)
 
@@ -138,7 +152,7 @@ func (s *Service) mintSolanaNFT(toAddress string, asset *Asset, fileUrl string) 
 					MintAuth:   feePayer.PublicKey,
 					FreezeAuth: &feePayer.PublicKey,
 				}),
-				token_metadata.CreateMetadataAccountV2(token_metadata.CreateMetadataAccountV2Param{
+				token_metadata.CreateMetadataAccountV3(token_metadata.CreateMetadataAccountV3Param{
 					Metadata:                tokenMetadataPubkey,
 					Mint:                    mint.PublicKey,
 					MintAuthority:           feePayer.PublicKey,
@@ -168,6 +182,7 @@ func (s *Service) mintSolanaNFT(toAddress string, asset *Asset, fileUrl string) 
 							Total:     10,
 						},
 					},
+					CollectionDetails: nil,
 				}),
 				associated_token_account.CreateAssociatedTokenAccount(associated_token_account.CreateAssociatedTokenAccountParam{
 					Funder:                 feePayer.PublicKey,
@@ -275,4 +290,139 @@ func (s *Service) transferSolanaNFT(mintAddr, fromPrikey, toAddr string) (string
 	}
 
 	return sig, nil
+}
+
+func (s *Service) createSolanaNFTCollection(name, symbol, metaUrl string) (*CollectionVO, error) {
+	client := resty.New()
+	chainCfg := s.getSolanaChainConfig()
+	serviceUrl := chainCfg.CompressedService
+	if len(serviceUrl) == 0 {
+		return nil, errors.New("invalid service URL")
+	}
+	// do request
+	var result struct {
+		Code uint   `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Collection CollectionVO `json:"collection,omitempty"`
+			Exception  string       `json:"exception,omitempty"`
+		} `json:"data"`
+	}
+	if _, err := client.R().
+		SetFormData(map[string]string{
+			"payer":   chainCfg.Funder,
+			"name":    name,
+			"symbol":  symbol,
+			"metaurl": metaUrl,
+		}).
+		SetResult(&result).Post(fmt.Sprintf("%v/api/createCollection", serviceUrl)); err != nil {
+		log.Errorf("calling rosen solana service error: %v", err)
+	}
+
+	if result.Code != 200 {
+		log.Errorf("create collection failed: %v", result.Msg)
+		log.Errorf("%v", result.Data.Exception)
+		return nil, errors.New(fmt.Sprintf("return code is %d", result.Code))
+	}
+
+	return &result.Data.Collection, nil
+}
+
+func (s *Service) mintSolanaCompressedNFT(toAddress string, asset *Asset, fileUrl string, collection *CollectionVO) ( /*txhash*/ string, error) {
+	client := resty.New()
+	chainCfg := s.getSolanaChainConfig()
+	serviceUrl := chainCfg.CompressedService
+	if len(serviceUrl) == 0 {
+		return "", errors.New("invalid service URL")
+	}
+	// do request
+	var result struct {
+		Code uint   `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			TxHash    string `json:"txhash,omitempty"`
+			AssetID   string `json:"assetId,omitempty"`
+			LeafID    uint64 `json:"leafId,omitempty"`
+			Exception string `json:"exception,omitempty"`
+		} `json:"data"`
+	}
+	tree, err := types.AccountFromBase58(chainCfg.DefaultNFT.TreePriKey)
+	if err != nil {
+		log.Errorf("invalid from account: %v", err)
+		return "", err
+	}
+
+	if _, err := client.R().
+		SetFormData(map[string]string{
+			"payer":                chainCfg.Funder,
+			"tree":                 tree.PublicKey.ToBase58(),
+			"creator":              toAddress,
+			"mint":                 collection.MintAccount,
+			"tokenAccount":         collection.TokenAccount,
+			"metadataAccount":      collection.MetadataAccount,
+			"masterEditionAccount": collection.MasterEditionAccount,
+			"name":                 asset.Name,
+			"symbol":               asset.Kind,
+			"metaUrl":              fileUrl,
+		}).
+		SetResult(&result).Post(fmt.Sprintf("%v/api/compressed/mint", serviceUrl)); err != nil {
+		log.Errorf("calling rosen solana service error: %v", err)
+	}
+
+	if result.Code != 200 {
+		log.Errorf("create compressed nft failed: %v", result.Msg)
+		log.Errorf("%v", result.Data.Exception)
+		return "", errors.New(fmt.Sprintf("return code is %d", result.Code))
+	}
+	log.Infof("create compressed nft: %v", result.Data.AssetID)
+	asset.NFTAddress = result.Data.AssetID
+	asset.TokenId = result.Data.LeafID
+
+	return result.Data.TxHash, nil
+}
+
+func (s *Service) transferSolanaCompressedNFT(mintAddr, fromPrikey, toAddr string) (string, error) {
+
+	client := resty.New()
+	chainCfg := s.getSolanaChainConfig()
+	serviceUrl := chainCfg.CompressedService
+	if len(serviceUrl) == 0 {
+		return "", errors.New("invalid service URL")
+	}
+	tree, err := types.AccountFromBase58(chainCfg.DefaultNFT.TreePriKey)
+	if err != nil {
+		log.Errorf("invalid from account: %v", err)
+		return "", err
+	}
+
+	// do request
+	var result struct {
+		Code uint   `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			TxHash    string `json:"txhash,omitempty"`
+			AssetID   string `json:"assetId,omitempty"`
+			Exception string `json:"exception,omitempty"`
+		} `json:"data"`
+	}
+	if _, err := client.R().
+		SetFormData(map[string]string{
+			"payer":   chainCfg.Funder,
+			"tree":    tree.PublicKey.ToBase58(),
+			"owner":   fromPrikey,
+			"to":      toAddr,
+			"assetId": mintAddr,
+		}).
+		SetResult(&result).Post(fmt.Sprintf("%v/api/compressed/transfer/%s", serviceUrl, mintAddr)); err != nil {
+		log.Errorf("calling rosen solana service error: %v", err)
+	}
+
+	if result.Code != 200 {
+		log.Errorf("transfer compressed nft failed: %v", result.Msg)
+		log.Errorf("%v", result.Data.Exception)
+		return "", fmt.Errorf("return code is %d", result.Code)
+	}
+	log.Infof("create compressed nft: %v", result.Data.AssetID)
+
+	return result.Data.TxHash, nil
 }

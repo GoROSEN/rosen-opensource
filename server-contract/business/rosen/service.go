@@ -7,23 +7,28 @@ import (
 	"io"
 	"math"
 	"math/big"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/GoROSEN/rosen-opensource/server-contract/business/mall"
-	"github.com/GoROSEN/rosen-opensource/server-contract/core/blockchain"
-	"github.com/GoROSEN/rosen-opensource/server-contract/core/common"
-	"github.com/GoROSEN/rosen-opensource/server-contract/core/config"
-	"github.com/GoROSEN/rosen-opensource/server-contract/features/account"
-	"github.com/GoROSEN/rosen-opensource/server-contract/features/member"
-	"github.com/GoROSEN/rosen-opensource/server-contract/features/message"
+	"github.com/GoROSEN/rosen-apiserver/business/mall"
+	"github.com/GoROSEN/rosen-apiserver/core/blockchain"
+	"github.com/GoROSEN/rosen-apiserver/core/common"
+	"github.com/GoROSEN/rosen-apiserver/core/config"
+	"github.com/GoROSEN/rosen-apiserver/core/rpc"
+	"github.com/GoROSEN/rosen-apiserver/features/account"
+	"github.com/GoROSEN/rosen-apiserver/features/member"
+	"github.com/GoROSEN/rosen-apiserver/features/message"
 	"github.com/go-redis/redis/v7"
 	"github.com/google/martian/log"
 	shell "github.com/ipfs/go-ipfs-api"
+	"github.com/jinzhu/copier"
 	"github.com/oschwald/geoip2-golang"
 	"gorm.io/gorm"
 )
+
+const kSystemAccountID uint = 1
 
 type AlphaSysConfig struct {
 	MintBeforeOccupy        uint64  // 占地前需要mint几次
@@ -37,6 +42,10 @@ type AlphaSysConfig struct {
 	WithdrawAmountFloor     float64 // 最低提现金额
 	EnableExchange          bool    // 是否开启兑换
 	MoveToEarnRateLimit     uint64  // move to earn 会话更新最短时间（秒）
+	TransferCoinFloor       float64 // 转账最低金额（USDT）
+	TransferCoinMax         float64 // 单笔转账最高金额（USDT）
+	TransferCoinDailyLimit  float64 // 单比转账最高金额（USDT）
+	CustomServiceMemberId   uint64  // 客服用户ID
 }
 
 // Service 服务层
@@ -48,6 +57,8 @@ type Service struct {
 	sysconfig      AlphaSysConfig
 	m2eCacheLife   time.Duration
 	msgMod         *message.MsgMod
+	rpcServer      *rpc.AmqpRpcServer
+	rpcClient      *rpc.AmqpRpcClient
 }
 
 // NewService 新建服务
@@ -64,9 +75,16 @@ func NewService(_db *gorm.DB, rds *redis.Client, account *account.AccountService
 		WithdrawAmountFloor:     50.0,
 		EnableExchange:          false,
 		MoveToEarnRateLimit:     5,
+		TransferCoinFloor:       10.0,
+		TransferCoinMax:         150.0,
+		TransferCoinDailyLimit:  1000.0,
+		CustomServiceMemberId:   0,
 	}, time.Duration(config.GetConfig().Rosen.MTE.KeepAliveDurationInSec+1200) * time.Second, // redis缓存时间为keep alive时间加上两倍的update m2e周期（目前一个周期10m，见cronjob.go）
-		msgMod}
+		msgMod,
+		&rpc.AmqpRpcServer{},
+		&rpc.AmqpRpcClient{}}
 	s.LoadSysConfig()
+	s.InitGame()
 	return s
 }
 
@@ -101,6 +119,14 @@ func (s *Service) LoadSysConfig() error {
 			s.sysconfig.EnableExchange, _ = strconv.ParseBool(c.Value)
 		case "MoveToEarnRateLimit":
 			s.sysconfig.MoveToEarnRateLimit, _ = strconv.ParseUint(c.Value, 10, 64)
+		case "TransferCoinFloor":
+			s.sysconfig.TransferCoinFloor, _ = strconv.ParseFloat(c.Value, 64)
+		case "TransferCoinMax":
+			s.sysconfig.TransferCoinMax, _ = strconv.ParseFloat(c.Value, 64)
+		case "TransferCoinDailyLimit":
+			s.sysconfig.TransferCoinDailyLimit, _ = strconv.ParseFloat(c.Value, 64)
+		case "CustomServiceMemberId":
+			s.sysconfig.CustomServiceMemberId, _ = strconv.ParseUint(c.Value, 10, 64)
 		}
 	}
 	log.Infof("setup rosen alpha config: done")
@@ -135,7 +161,7 @@ func (s *Service) SetupNewMember(db *gorm.DB, obj *member.Member) error {
 	}
 	log.Infof("saved member sns summary")
 	extra := &MemberExtra{MemberID: obj.ID, Level: 1, OccupyLimit: 2}
-	if err := db.Create(extra).Error; err != nil {
+	if err := db.Omit("CurrentEquip").Create(extra).Error; err != nil {
 		log.Errorf("save extra error: %v", err)
 		return err
 	}
@@ -152,7 +178,7 @@ func (s *Service) SetupNewMember(db *gorm.DB, obj *member.Member) error {
 		var bc blockchain.BlockChainAccess
 		if c.Name == "solana" {
 			bc, _ = blockchain.NewSolanaChainAccess(c)
-		} else if c.Name == "bnb" {
+		} else if c.Name == "bnb" || c.Name == "okc" || c.Name == "polygon" {
 			bc, _ = blockchain.NewGethChainAccess(c)
 		}
 		if bc != nil {
@@ -204,7 +230,7 @@ func (s *Service) MaintainPlot(plotId, memberId uint, energyCost float64) (float
 
 	cfg := config.GetConfig().Rosen
 	var plot Plot
-	if err := s.GetModelByID(&plot, plotId); err != nil {
+	if err := s.GetPreloadModelByID(&plot, plotId, []string{"Blazer.Member"}); err != nil {
 		log.Errorf("cannot get plot: %v", err)
 		return 0, errors.New("message.plot.plot-not-found")
 	}
@@ -242,7 +268,10 @@ func (s *Service) MaintainPlot(plotId, memberId uint, energyCost float64) (float
 	}
 	accservice.Commit()
 	c := cost / math.Pow10(int(cfg.Energy.Decimals))
-	s.msgMod.SendSysMessage(memberId, "info-maintain-success", "en_US", increasement, c)
+	s.msgMod.SendSysMessage(memberId, "info-maintain-success", plot.Blazer.Member.Language, map[string]interface{}{
+		"Increasement": increasement,
+		"Cost":         c,
+	})
 	return c, nil
 }
 
@@ -257,7 +286,7 @@ func (s *Service) SaveFileToIpfs(fs io.Reader) (string, error) {
 }
 
 func (s *Service) MintNFT(chain string, extra *MemberExtra, plot *Plot, count int, imgOssUrl, imgIpfsUrl string, producerAcc *account.Account) (float64, error) {
-
+	log.Infof("minting nft, chain = %v, memberid = %v, plot id = %v, count = %v, producerAccId = %v", chain, extra.MemberID, plot.ID, count, producerAcc.ID)
 	memberId := extra.MemberID
 	// prepare wallet address
 	var toAddress string
@@ -279,7 +308,7 @@ func (s *Service) MintNFT(chain string, extra *MemberExtra, plot *Plot, count in
 	tokenName := config.GetConfig().Rosen.Coin.TokenName
 	decimals := int64(config.GetConfig().Rosen.Coin.Decimals)
 	blazerAcc := s.accountService.GetAccountByUserAndType(plot.BlazerID, tokenName)
-	sysAcc := s.accountService.GetAccountByUserAndType(1, tokenName)
+	sysAcc := s.accountService.GetAccountByUserAndType(kSystemAccountID, tokenName)
 	var coblazerAcc *account.Account
 	if plot.CoBlazerID > 0 {
 		coblazerAcc = s.accountService.GetAccountByUserAndType(plot.CoBlazerID, tokenName)
@@ -289,18 +318,34 @@ func (s *Service) MintNFT(chain string, extra *MemberExtra, plot *Plot, count in
 
 	var incoming, tax int64
 
-	outgoing0 := int64(plot.MintPrice) * int64(math.Pow10(int(decimals)))
+	mintPrice := plot.MintPrice
+
+	if plot.MintPriceByChains != nil && len(plot.MintPriceByChains) > 0 {
+		// var mintPriceByChains map[string]uint64
+		// json.Unmarshal([]byte(plot.MintPriceByChains), &mintPriceByChains)
+		price, exists := plot.MintPriceByChains[chain]
+		if !exists {
+			log.Errorf("chain %v is not allowed to mint")
+			return 0, errors.New("chain not allowed")
+		}
+		mintPrice = price
+		log.Infof("mint price for chain %v is %v", chain, mintPrice)
+	}
+
+	outgoing0 := int64(mintPrice) * int64(math.Pow10(int(decimals)))
 	outgoing := outgoing0 * int64(count)
-	incoming0 := int64(float64(plot.MintPrice) * (1.0 - plot.TaxRate) * math.Pow10(int(decimals)))
+	incoming0 := int64(float64(mintPrice) * (1.0 - plot.TaxRate) * math.Pow10(int(decimals)))
 	tax0 := outgoing0 - incoming0
+	successCount := 0
 
 	if _, err := s.accountService.Freeze(producerAcc, outgoing, fmt.Sprintf("mint %v NFT at plot %v (ID:%v)", count, plot.Name, plot.ID)); err != nil {
 		log.Errorf("cannot freeze rosen for producer account %v: %v", producerAcc.ID, err)
 		return 0, errors.New("message.token.insufficient-token")
 	}
 
+	actualCount := 0
 	for i := 0; i < count; i++ {
-		mintlog := MintLog{ProducerID: memberId, PlotID: plot.ID, BlazerID: plot.BlazerID, PayedAmount: plot.MintPrice}
+		mintlog := MintLog{ProducerID: memberId, PlotID: plot.ID, BlazerID: plot.BlazerID, PayedAmount: mintPrice}
 		// 组织描述文件并存到ipfs
 		var metaFilUrl string
 		if str, err := s.saveMetaPlexFileToIpfs(plot.Name, plot.Description, imgIpfsUrl, i+1, count, &extra.Member, &plot.Blazer.Member); err != nil {
@@ -324,27 +369,87 @@ func (s *Service) MintNFT(chain string, extra *MemberExtra, plot *Plot, count in
 		if err := s.CreateModel(&asset); err != nil {
 			log.Errorf("cannot create asset: %v", err)
 		}
+		mintlog.ToAddress = toAddress
+		mintlog.AssetID = asset.ID
+		mintlog.MetaFileURL = metaFilUrl
+		mintlog.Chain = chain
 		// mint solana nft，若失败则重试（后续改为异步）
 		// 失败1：链上mint失败
 		// 失败2：数据库创建资产失败
 		log.Infof("mint %v/%v on %v", i+1, count, chain)
 		if chain == "solana" {
-			if tx, err := s.mintSolanaNFT(toAddress, &asset, metaFilUrl); err != nil {
-				// retry
-				log.Errorf("mint nft failed: %v", err)
-				mintlog.Result = fmt.Sprintf("mint nft failed: %v", err)
-				mintlog.Success = false
+			cfg := config.GetConfig().Rosen
+			var chainCfg *config.BlockchainConfig
+			for i := range cfg.Chains {
+				if cfg.Chains[i].Name == chain {
+					chainCfg = &cfg.Chains[i]
+					break
+				}
+			}
+			if chainCfg == nil {
+				return 0, errors.New("cannot load solana chain config")
+			}
+
+			var mintTx string
+			mintSuccess := false
+			if chainCfg.DefaultNFT.Compressed {
+				chainCfg := s.getSolanaChainConfig()
+				if chainCfg == nil {
+					return 0, errors.New("cannot load solana chain config")
+				}
+
+				var plotCol PlotCollection
+				// collection 合并为与suit相同一个
+				// if err := s.FindModelWhere(&plotCol, "plot_id = ?", plot.ID); err != nil {
+				if err := s.FindModelWhere(&plotCol, "plot_id = -1"); err != nil {
+					// create collection
+					if vo, err := s.createSolanaNFTCollection(plot.Name, "RPN", ""); err != nil {
+						log.Errorf("cannot create compressed collection: %v", err)
+						return 0, err
+					} else {
+						copier.Copy(&plotCol, vo)
+						plotCol.PlotID = int(plot.ID)
+						if err := s.CreateModel(&plotCol); err != nil {
+							log.Errorf("cannot save plot collection: %v", err)
+							return 0, err
+						}
+					}
+				}
+				var collection CollectionVO
+				copier.Copy(&collection, &plotCol)
+				if tx, err := s.mintSolanaCompressedNFT(toAddress, &asset, metaFilUrl, &collection); err != nil {
+					// retry
+					log.Errorf("mint nft failed: %v", err)
+					mintlog.Result = fmt.Sprintf("mint nft failed: %v", err)
+					mintlog.Success = false
+				} else {
+					mintTx = tx
+					mintSuccess = true
+				}
 			} else {
+				if tx, err := s.mintSolanaNFT(toAddress, &asset, metaFilUrl); err != nil {
+					// retry
+					log.Errorf("mint nft failed: %v", err)
+					mintlog.Result = fmt.Sprintf("mint nft failed: %v", err)
+					mintlog.Success = false
+				} else {
+					mintTx = tx
+					mintSuccess = true
+				}
+			}
+			if mintSuccess {
 				log.Infof("mint nft success")
-				if err := s.UpdateModel(&asset, []string{"NFTAddress"}, nil); err != nil {
+				if err := s.UpdateModel(&asset, []string{"NFTAddress", "TokenId"}, nil); err != nil {
 					log.Errorf("cannot create asset: %v", err)
 				}
-				mintlog.Result = fmt.Sprintf("success, tx: %v", tx)
+				// solana个垃圾，这里改成pending，由定时任务复查
+				mintlog.Result = fmt.Sprintf("pending, tx: %v", mintTx)
 				mintlog.Success = true
 				incoming += incoming0
 				tax += tax0
+				successCount++
 			}
-		} else if chain == "bnb" {
+		} else if chain == "bnb" || chain == "okc" || chain == "polygon" {
 			bc, chainCfg := s.getChainAccessor(chain)
 			if bc != nil {
 				if tx, err := bc.MintNFT(toAddress, chainCfg.DefaultNFT.ContractAddress, uint64(asset.ID), metaFilUrl); err != nil {
@@ -363,6 +468,7 @@ func (s *Service) MintNFT(chain string, extra *MemberExtra, plot *Plot, count in
 					mintlog.Success = true
 					incoming += incoming0
 					tax += tax0
+					successCount++
 				}
 			}
 		}
@@ -375,45 +481,49 @@ func (s *Service) MintNFT(chain string, extra *MemberExtra, plot *Plot, count in
 		if coblazerAcc != nil {
 			coincoming := int64(float64(incoming) * plot.CoBlazerShare)
 			blazerIncoming -= coincoming
-			if _, err := s.accountService.Unfreeze(producerAcc, coblazerAcc, coincoming, fmt.Sprintf("mint %v NFT at plot %v (ID:%v)", count, plot.Name, plot.ID)); err != nil {
+			if _, err := s.accountService.Unfreeze(producerAcc, coblazerAcc, coincoming, fmt.Sprintf("mint %v NFT at plot %v (ID:%v)", actualCount, plot.Name, plot.ID)); err != nil {
 				log.Errorf("cannot pay rosen to blazer account %v: %v", coblazerAcc.ID, err)
 			}
-			if _, err := s.accountService.Lock(coblazerAcc, coincoming, fmt.Sprintf("mint %v NFT at plot %v (ID:%v)", count, plot.Name, plot.ID)); err != nil {
+			if _, err := s.accountService.Lock(coblazerAcc, coincoming, fmt.Sprintf("mint %v NFT at plot %v (ID:%v)", actualCount, plot.Name, plot.ID)); err != nil {
 				log.Errorf("cannot lock blazer account %v: %v", coblazerAcc.ID, err)
 			}
 		}
-		if _, err := s.accountService.Unfreeze(producerAcc, blazerAcc, blazerIncoming, fmt.Sprintf("mint %v NFT at plot %v (ID:%v)", count, plot.Name, plot.ID)); err != nil {
+		if _, err := s.accountService.Unfreeze(producerAcc, blazerAcc, blazerIncoming, fmt.Sprintf("mint %v NFT at plot %v (ID:%v)", actualCount, plot.Name, plot.ID)); err != nil {
 			log.Errorf("cannot pay rosen to blazer account %v: %v", blazerAcc.ID, err)
 		}
-		if _, err := s.accountService.Lock(blazerAcc, blazerIncoming, fmt.Sprintf("mint %v NFT at plot %v (ID:%v)", count, plot.Name, plot.ID)); err != nil {
+		if _, err := s.accountService.Lock(blazerAcc, blazerIncoming, fmt.Sprintf("mint %v NFT at plot %v (ID:%v)", actualCount, plot.Name, plot.ID)); err != nil {
 			log.Errorf("cannot lock blazer account %v: %v", blazerAcc.ID, err)
 		}
 	}
 	if tax > 0 {
-		if _, err := s.accountService.Unfreeze(producerAcc, sysAcc, tax, fmt.Sprintf("mint %v NFT at plot %v (ID:%v)", count, plot.Name, plot.ID)); err != nil {
+		if _, err := s.accountService.Unfreeze(producerAcc, sysAcc, tax, fmt.Sprintf("mint %v NFT at plot %v (ID:%v)", actualCount, plot.Name, plot.ID)); err != nil {
 			log.Errorf("cannot pay rosen to sys account %v: %v", sysAcc.ID, err)
 		}
 	}
 	if returnback > 0 {
-		if _, err := s.accountService.Unfreeze(producerAcc, producerAcc, returnback, fmt.Sprintf("failure part of mint %v NFT at plot %v (ID:%v)", count, plot.Name, plot.ID)); err != nil {
+		if _, err := s.accountService.Unfreeze(producerAcc, producerAcc, returnback, fmt.Sprintf("failure part of mint %v NFT at plot %v (ID:%v)", (count-actualCount), plot.Name, plot.ID)); err != nil {
 			log.Errorf("cannot pay rosen to producer account %v: %v", producerAcc.ID, err)
 		}
 	}
 
 	// 更新plot被mint统计
-	var p Plot
-	p.ID = uint(plot.ID)
-	s.Db.Model(&p).Updates(map[string]interface{}{"daily_mint_count": gorm.Expr("daily_mint_count + ?", count), "monthly_mint_count": gorm.Expr("monthly_mint_count + ?", count), "mint_count": gorm.Expr("mint_count + ?", count)})
+	if successCount > 0 {
+		var p Plot
+		p.ID = uint(plot.ID)
+		s.Db.Model(&p).Updates(map[string]interface{}{"daily_mint_count": gorm.Expr("daily_mint_count + ?", successCount), "monthly_mint_count": gorm.Expr("monthly_mint_count + ?", successCount), "mint_count": gorm.Expr("mint_count + ?", successCount)})
+	}
 
-	// 给用户发送energy奖励
-	producerEnergyAcc := s.accountService.GetAccountByUserAndType(memberId, "energy")
-	sysEnergyAcc := s.accountService.GetAccountByUserAndType(1, "energy")
-	if producerEnergyAcc != nil && sysEnergyAcc != nil {
-		if _, err := s.accountService.Transfer(sysEnergyAcc, producerEnergyAcc, int64(plot.MintEnergy)*int64(count), fmt.Sprintf("bonus for minting on plot %v with count %v", plot.ID, count)); err != nil {
-			log.Errorf("cannot send mint bonus for member %v, energy %v, plot %v, count %v", memberId, int64(plot.MintEnergy)*int64(count), plot.ID, count)
+	if plot.MintEnergy > 0 && actualCount > 0 {
+		// 给用户发送energy奖励
+		producerEnergyAcc := s.accountService.GetAccountByUserAndType(memberId, "energy")
+		sysEnergyAcc := s.accountService.GetAccountByUserAndType(kSystemAccountID, "energy")
+		if producerEnergyAcc != nil && sysEnergyAcc != nil {
+			if _, err := s.accountService.Transfer(sysEnergyAcc, producerEnergyAcc, int64(plot.MintEnergy)*int64(successCount), fmt.Sprintf("bonus for minting on plot %v with count %v", plot.ID, successCount)); err != nil {
+				log.Errorf("cannot send mint bonus for member %v, energy %v, plot %v, count %v", memberId, int64(plot.MintEnergy)*int64(count), plot.ID, successCount)
+			}
+		} else {
+			log.Errorf("producerEnergyAcc or sysEnergyAcc is nil")
 		}
-	} else {
-		log.Errorf("producerEnergyAcc or sysEnergyAcc is nil")
 	}
 
 	return float64(incoming) / math.Pow10(int(decimals)), nil
@@ -485,6 +595,10 @@ func (s *Service) saveSuitMetaPlexFileToIpfs(name, description, imgIpfsUrl strin
 			{
 				"trait_type": "Level",
 				"value": "%v"
+			},
+			{
+				"trait_type": "Minted Time",
+				"value": "%v"
 			}
 		],
 		"properties": {
@@ -495,7 +609,7 @@ func (s *Service) saveSuitMetaPlexFileToIpfs(name, description, imgIpfsUrl strin
 				}
 			]
 		}
-	}`, name, "ROS-SUIT", description, imgIpfsUrl, number, count, level, imgIpfsUrl)
+	}`, name, "ROS-SUIT", description, imgIpfsUrl, number, count, level, time.Now().UTC().Format(time.UnixDate), imgIpfsUrl)
 	cid, err := sh.Add(strings.NewReader(metaData))
 	if err != nil {
 		return "", err
@@ -541,8 +655,8 @@ func (s *Service) TransferAsset(memberId uint, assetID uint, toMemberId uint) er
 		return errors.New("message.assets.no-private-wallet-for-receiver")
 	}
 	//TODO: transfer via blockchain
-	if asset.ChainName == "bnb" {
-		bc, bcconfig := s.getChainAccessor("bnb")
+	if asset.ChainName == "bnb" || asset.ChainName == "okc" || asset.ChainName == "polygon" {
+		bc, bcconfig := s.getChainAccessor(asset.ChainName)
 		if bc != nil {
 			gasFee := big.NewInt(68566 * bcconfig.GasPrice) // gaslimit = 68,565（首次）;53,565（后续）
 			if balance, err := bc.QueryCoin(asset.OwnerAddress); err != nil {
@@ -561,9 +675,16 @@ func (s *Service) TransferAsset(memberId uint, assetID uint, toMemberId uint) er
 			}
 		}
 	} else {
-		if _, err := s.transferSolanaNFT(asset.NFTAddress, wallet.PriKey, toAddress); err != nil {
-			log.Errorf("transfer solana nft error: %v", err)
-			return errors.New("message.mint.blockchain-op-error")
+		if asset.TokenId > 0 {
+			if _, err := s.transferSolanaCompressedNFT(asset.NFTAddress, wallet.PriKey, toAddress); err != nil {
+				log.Errorf("transfer compressed solana nft error: %v", err)
+				return errors.New("message.mint.blockchain-op-error")
+			}
+		} else {
+			if _, err := s.transferSolanaNFT(asset.NFTAddress, wallet.PriKey, toAddress); err != nil {
+				log.Errorf("transfer solana nft error: %v", err)
+				return errors.New("message.mint.blockchain-op-error")
+			}
 		}
 	}
 
@@ -580,11 +701,11 @@ func (s *Service) TransferAsset(memberId uint, assetID uint, toMemberId uint) er
 	return nil
 }
 
-func (s *Service) OccupyPlot(plotId, memberId uint) error {
+func (s *Service) OccupyPlot(plotId, memberId uint, coinCfg *config.RosenCoinConfig) error {
 
 	// 检查用户是否有资格占地
 	var extra MemberExtra
-	if err := s.GetModelByID(&extra, uint(memberId)); err != nil {
+	if err := s.GetPreloadModelByID(&extra, uint(memberId), []string{"Member"}); err != nil {
 		log.Errorf("cannot find member with id: %v", err)
 		return errors.New("message.member.member-not-found")
 	}
@@ -620,24 +741,22 @@ func (s *Service) OccupyPlot(plotId, memberId uint) error {
 	}
 
 	// 检查用户是否有足够的钱
-	tokenName := config.GetConfig().Rosen.Coin.TokenName
-	decimals := int64(config.GetConfig().Rosen.Coin.Decimals)
-	r := s.accountService.GetAccountByUserAndType(uint(memberId), tokenName)
+	r := s.accountService.GetAccountByUserAndType(uint(memberId), coinCfg.TokenName)
 	if r == nil {
-		log.Errorf("cannot get %v account for %v", tokenName, memberId)
+		log.Errorf("cannot get %v account for %v", coinCfg.TokenName, memberId)
 		return errors.New("no token account")
 	}
-	if r.Available/int64(math.Pow10(int(decimals))) < int64(plot.Price) {
+	if r.Available/int64(math.Pow10(int(coinCfg.Decimals))) < int64(plot.Price) {
 		log.Errorf("insufficient rosen founds")
 		return errors.New("message.token.insufficient-token")
 	}
-	sysacc := s.accountService.GetAccountByUserAndType(1, tokenName)
+	sysacc := s.accountService.GetAccountByUserAndType(kSystemAccountID, coinCfg.TokenName)
 	if sysacc == nil {
 		log.Errorf("cannot get token account for sysacc")
 		return errors.New("message.common.system-error")
 	}
 	a := s.accountService.Begin()
-	if _, err := a.Transfer(r, sysacc, int64(plot.Price)*int64(math.Pow10(int(decimals))), fmt.Sprintf("occupy plot %v", plot.ID)); err != nil {
+	if _, err := a.Transfer(r, sysacc, int64(plot.Price)*int64(math.Pow10(int(coinCfg.Decimals))), fmt.Sprintf("occupy plot %v", plot.ID)); err != nil {
 		a.Rollback()
 		log.Errorf("cannot occupy the plot: %v", err)
 		return errors.New("message.common.system-error")
@@ -649,7 +768,7 @@ func (s *Service) OccupyPlot(plotId, memberId uint) error {
 		return errors.New("message.common.system-error")
 	}
 	a.Commit()
-	s.msgMod.SendSysMessage(memberId, "info-occupy-success", "en_US", plot.Name, plot.Price)
+	s.msgMod.SendSysMessage(memberId, "info-occupy-success", extra.Member.Language, &plot)
 	return nil
 }
 
@@ -669,7 +788,8 @@ func (s *Service) ExchangeCoin(fromType, toType string, value, memberId uint) (i
 	exchangeRates := map[string]map[string]float64{
 		"energy": {"rosen": 0.00015625 * math.Pow10(int(cfg.Coin.Decimals)), "usdt": 0.00015625 * math.Pow10(int(cfg.Coin.Decimals))},
 		"rosen":  {"energy": 64.0 * math.Pow10(int(cfg.Energy.Decimals)-int(cfg.Coin.Decimals))},
-		"usdt":   {"energy": 64.0 * math.Pow10(int(cfg.Energy.Decimals)-int(cfg.Coin.Decimals))},
+		"usdt": {"energy": 64.0 * math.Pow10(int(cfg.Energy.Decimals)-int(cfg.Coin.Decimals)),
+			"gem": 1.0 * math.Pow10(int(cfg.Coin2.Decimals)-int(cfg.Coin.Decimals))},
 	}
 
 	m1, exists := exchangeRates[fromType]
@@ -688,7 +808,7 @@ func (s *Service) ExchangeCoin(fromType, toType string, value, memberId uint) (i
 		log.Errorf("rosen/service/ExchangeCoin: invalid account")
 		return 0, errors.New("message.common.system-error")
 	}
-	toAccount0 := s.accountService.GetAccountByUserAndType(1, fromType)
+	toAccount0 := s.accountService.GetAccountByUserAndType(kSystemAccountID, fromType)
 	if toAccount0 == nil {
 		log.Errorf("rosen/service/ExchangeCoin: invalid sys to account")
 		return 0, errors.New("message.common.system-error")
@@ -704,7 +824,7 @@ func (s *Service) ExchangeCoin(fromType, toType string, value, memberId uint) (i
 		log.Errorf("rosen/service/ExchangeCoin: invalid account")
 		return 0, errors.New("message.common.system-error")
 	}
-	fromAccount0 := s.accountService.GetAccountByUserAndType(1, toType)
+	fromAccount0 := s.accountService.GetAccountByUserAndType(kSystemAccountID, toType)
 	if fromAccount0 == nil {
 		log.Errorf("rosen/controller/exchangeCoin: invalid sys from account")
 		return 0, errors.New("message.common.system-error")
@@ -734,7 +854,19 @@ func (s *Service) ExchangeCoin(fromType, toType string, value, memberId uint) (i
 		value0 /= int64(math.Pow10(int(cfg.Coin.Decimals)))
 		value1 /= int64(math.Pow10(int(cfg.Energy.Decimals)))
 	}
-	s.msgMod.SendSysMessage(memberId, "info-exchange-success", "en_US", value1, toType, value0, fromType)
+	var m member.Member
+	msgParams := map[string]interface{}{
+		"FromType":  fromType,
+		"FromValue": value0,
+		"ToType":    toType,
+		"ToValue":   value1,
+	}
+	if err := s.GetModelByID(&m, memberId); err != nil {
+		log.Errorf("cannot get member: %v", err)
+		s.msgMod.SendSysMessage(memberId, "info-exchange-success", "en-US", msgParams)
+	} else {
+		s.msgMod.SendSysMessage(memberId, "info-exchange-success", m.Language, msgParams)
+	}
 	return value0, nil
 }
 
@@ -774,7 +906,7 @@ func (s *Service) TransferPlot(listing *ListingPlot, successorId uint) (float64,
 	log.Infof("transfering plot %v from %v to %v", listing.PlotID, listing.BlazerID, successorId)
 	// 检查用户是否有资格占地
 	var extra MemberExtra
-	if err := s.GetModelByID(&extra, uint(successorId)); err != nil {
+	if err := s.GetPreloadModelByID(&extra, uint(successorId), []string{"Member"}); err != nil {
 		log.Errorf("cannot find member with id: %v", err)
 		return 0, errors.New("message.member.member-not-found")
 	}
@@ -801,7 +933,7 @@ func (s *Service) TransferPlot(listing *ListingPlot, successorId uint) (float64,
 		log.Errorf("cannot get rosen account for toAccount")
 		return 0, errors.New("message.common.system-error")
 	}
-	sysacc := s.accountService.GetAccountByUserAndType(1, tokenName)
+	sysacc := s.accountService.GetAccountByUserAndType(kSystemAccountID, tokenName)
 	if sysacc == nil {
 		log.Errorf("cannot get rosen account for sysacc")
 		return 0, errors.New("message.common.system-error")
@@ -836,7 +968,7 @@ func (s *Service) TransferPlot(listing *ListingPlot, successorId uint) (float64,
 	}
 
 	a.Commit()
-	s.msgMod.SendSysMessage(successorId, "info-buy-listing-success", "en_US", listing.Price)
+	s.msgMod.SendSysMessage(successorId, "info-buy-listing-success", extra.Member.Language, listing)
 
 	return incoming, nil
 }
@@ -923,7 +1055,7 @@ func (s *Service) AllCachedMteSessions() []*MteSessionVO {
 		return nil
 	}
 	sessions := make([]*MteSessionVO, len(keys))
-	if sessions == nil || len(sessions) == 0 {
+	if len(sessions) == 0 {
 		return sessions
 	}
 	for i := range keys {
@@ -938,7 +1070,7 @@ func (s *Service) AllCachedMteTraces() []*MteTraceItemVO {
 		return nil
 	}
 	tvo := make([]*MteTraceItemVO, len(keys))
-	if tvo == nil || len(tvo) == 0 {
+	if len(tvo) == 0 {
 		return tvo
 	}
 	for i := range keys {
@@ -985,7 +1117,7 @@ func (s *Service) WithdrawToken(memberId uint, amount float64, token, chain stri
 	}
 	if wallet.Chain == "solana" {
 		chainAccess, err = blockchain.NewSolanaChainAccess(chainCfg)
-	} else if wallet.Chain == "bnb" {
+	} else if wallet.Chain == "bnb" || wallet.Chain == "okc" || wallet.Chain == "polygon" {
 		chainAccess, err = blockchain.NewGethChainAccess(chainCfg)
 	}
 	if chainAccess != nil {
@@ -1063,17 +1195,25 @@ func (s *Service) getChainAccessor(chain string) (blockchain.BlockChainAccess, *
 		if c.Name == chain {
 			if c.Name == "solana" {
 				bc, _ = blockchain.NewSolanaChainAccess(c)
-			} else if c.Name == "bnb" {
+				break
+			} else if c.Name == "bnb" || c.Name == "okc" || c.Name == "polygon" {
 				bc, _ = blockchain.NewGethChainAccess(c)
+				break
 			}
 		}
 	}
 	return bc, c
 }
 
-func (s *Service) OrderMallEquip(memberId int, chain string, good *mall.Good, detail *mall.GoodDetail) error {
+func (s *Service) OrderMallEquip(memberId int, chain, coin string, good *mall.Good) error {
 
-	cfg := config.GetConfig().Rosen.Coin
+	var cfg *config.RosenCoinConfig
+
+	if coin == "gem" {
+		cfg = &config.GetConfig().Rosen.Coin2
+	} else {
+		cfg = &config.GetConfig().Rosen.Coin
+	}
 
 	// 验证用户id是否有效
 	var extra MemberExtra
@@ -1082,12 +1222,12 @@ func (s *Service) OrderMallEquip(memberId int, chain string, good *mall.Good, de
 		return errors.New("message.member.member-not-found")
 	}
 
-	memberAcc := s.accountService.GetAccountByUserAndType(extra.MemberID, "usdt")
+	memberAcc := s.accountService.GetAccountByUserAndType(extra.MemberID, cfg.TokenName)
 	if memberAcc == nil {
 		log.Errorf("cannot find member account for member %v", extra.MemberID)
 		return errors.New("message.member.member-not-found")
 	}
-	sysAcc := s.accountService.GetAccountByUserAndType(1, "usdt")
+	sysAcc := s.accountService.GetAccountByUserAndType(kSystemAccountID, cfg.TokenName)
 	if sysAcc == nil {
 		log.Errorf("cannot find system account")
 		return errors.New("message.common.system-error")
@@ -1103,7 +1243,8 @@ func (s *Service) OrderMallEquip(memberId int, chain string, good *mall.Good, de
 		return errors.New("message.token.insufficient-token")
 	}
 
-	if err := s.SendEquip(&extra, chain, good, detail); err != nil {
+	// 发货
+	if err := s.SendEquip(&extra, chain, good); err != nil {
 		accTxService.Rollback()
 		return err
 	}
@@ -1112,17 +1253,22 @@ func (s *Service) OrderMallEquip(memberId int, chain string, good *mall.Good, de
 	return nil
 }
 
-func (s *Service) SendEquip(extra *MemberExtra, chain string, good *mall.Good, detail *mall.GoodDetail) error {
+func (s *Service) SendEquip(extra *MemberExtra, chain string, good *mall.Good) error {
+
+	if good.Detail == nil {
+		return errors.New("good detail is null")
+	}
 
 	var suitInfo SuitGoodVO
-	if err := json.Unmarshal([]byte(detail.Description), &suitInfo); err != nil {
-		log.Errorf("cannot unmarshal suit detail: %v", err)
+
+	if err := json.Unmarshal([]byte(good.Detail.Description), &suitInfo); err != nil {
+		log.Errorf("cannot decode suit detail: %v", err)
 		return errors.New("message.common.system-error")
 	}
 
 	// 生成装备实例数据
 	var sp SuitParamsVO
-	logos := strings.Split(detail.ImageList, ",")
+	logos := strings.Split(good.Detail.ImageList, ",")
 	var suit Asset
 	suit.Name = good.Name
 	suit.Kind = "suit"
@@ -1155,7 +1301,21 @@ func (s *Service) SendEquip(extra *MemberExtra, chain string, good *mall.Good, d
 		suit.DueTo = 0
 	}
 	// mint装备实例
-	if len(chain) > 0 {
+	if len(chain) > 0 && (!suitInfo.DisableMint) {
+		// 图像传到IPFS
+		if len(suitInfo.ImgIpfsUrl) == 0 {
+			if resp, err := http.Get(suit.Image); err != nil {
+				log.Errorf("cannot download suit image: %v", err)
+				return err
+			} else {
+				defer resp.Body.Close()
+				if suitInfo.ImgIpfsUrl, err = s.SaveFileToIpfs(resp.Body); err != nil {
+					log.Errorf("cannot put suit image to ipfs: %v", err)
+					return err
+				}
+			}
+			log.Infof("suit image of ipfs: %v", suitInfo.ImgIpfsUrl)
+		}
 		if err := s.MintSuitNFT(chain, extra, &suit, suitInfo.ImgIpfsUrl); err != nil {
 			if suit.ID > 0 {
 				// 删除失败的装备
@@ -1164,12 +1324,19 @@ func (s *Service) SendEquip(extra *MemberExtra, chain string, good *mall.Good, d
 			log.Errorf("cannot mint suit NFT: %v", err)
 			return errors.New("message.common.system-error")
 		}
+	} else {
+		log.Infof("send suit to user %v without mint", extra.MemberID)
+		if err := s.CreateModel(&suit); err != nil {
+			log.Errorf("cannot create suit asset: %v", err)
+			return err
+		}
 	}
 	return nil
 }
 
 func (s *Service) MintSuitNFT(chain string, extra *MemberExtra, suit *Asset, imgIpfsUrl string) error {
 
+	log.Infof("minting suit nft, chain = %v, memberid = %v, suit id = %v", chain, extra.MemberID, suit.ID)
 	memberId := extra.MemberID
 	// prepare wallet address
 	var toAddress string
@@ -1200,7 +1367,7 @@ func (s *Service) MintSuitNFT(chain string, extra *MemberExtra, suit *Asset, img
 	suit.ChainName = chain
 	suit.Transferrable = &transferrable
 
-	if err := s.CreateModel(&suit); err != nil {
+	if err := s.CreateModel(suit); err != nil {
 		log.Errorf("cannot create suit asset: %v", err)
 		return err
 	}
@@ -1209,20 +1376,56 @@ func (s *Service) MintSuitNFT(chain string, extra *MemberExtra, suit *Asset, img
 	// 失败1：链上mint失败
 	// 失败2：数据库创建资产失败
 	if chain == "solana" {
-		if _, err := s.mintSolanaNFT(toAddress, suit, metaFilUrl); err != nil {
-			// retry
-			log.Errorf("mint nft failed: %v", err)
-			return err
+		mintSuccess := false
+		chainCfg := s.getSolanaChainConfig()
+		if chainCfg.DefaultNFT.Compressed {
+			chainCfg := s.getSolanaChainConfig()
+			if chainCfg == nil {
+				return errors.New("cannot load solana chain config")
+			}
+			// 装备使用plot id=0的collection
+			var plotCol PlotCollection
+			if err := s.FindModelWhere(&plotCol, "plot_id = 0"); err != nil {
+				// create collection
+				if vo, err := s.createSolanaNFTCollection("Suit", "RPN", ""); err != nil {
+					log.Errorf("cannot create compressed collection: %v", err)
+					return err
+				} else {
+					copier.Copy(&plotCol, vo)
+					plotCol.PlotID = 0
+					if err := s.CreateModel(&plotCol); err != nil {
+						log.Errorf("cannot save plot collection: %v", err)
+						return err
+					}
+				}
+			}
+			var collection CollectionVO
+			copier.Copy(&collection, &plotCol)
+			if _, err := s.mintSolanaCompressedNFT(toAddress, suit, metaFilUrl, &collection); err != nil {
+				// retry
+				log.Errorf("mint nft failed: %v", err)
+			} else {
+				mintSuccess = true
+			}
 		} else {
-			log.Infof("mint nft success")
-			if err := s.UpdateModel(&suit, []string{"NFTAddress"}, nil); err != nil {
-				log.Errorf("cannot create asset: %v", err)
+			if _, err := s.mintSolanaNFT(toAddress, suit, metaFilUrl); err != nil {
+				// retry
+				log.Errorf("mint nft failed: %v", err)
 				return err
+			} else {
+				mintSuccess = true
 			}
 		}
-	} else if chain == "bnb" {
+		if mintSuccess {
+			log.Infof("mint nft success")
+			if err := s.UpdateModel(suit, []string{"NFTAddress", "TokenId"}, nil); err != nil {
+				log.Errorf("cannot create asset: %v", err)
+			}
+		}
+	} else if chain == "bnb" || chain == "okc" || chain == "polygon" {
 		bc, chainCfg := s.getChainAccessor(chain)
 		if bc != nil {
+			log.Infof("chainCfg: %v", chainCfg)
 			if _, err := bc.MintNFT(toAddress, chainCfg.DefaultNFT.ContractAddress, uint64(suit.ID), metaFilUrl); err != nil {
 				log.Errorf("mint nft failed: %v", err)
 				return err

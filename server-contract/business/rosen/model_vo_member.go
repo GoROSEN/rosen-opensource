@@ -4,49 +4,57 @@ import (
 	"math"
 	"strings"
 
-	"github.com/GoROSEN/rosen-opensource/server-contract/core/config"
-	"github.com/GoROSEN/rosen-opensource/server-contract/features/account"
-	"github.com/GoROSEN/rosen-opensource/server-contract/features/member"
+	"github.com/GoROSEN/rosen-apiserver/core/config"
+	"github.com/GoROSEN/rosen-apiserver/features/account"
+	"github.com/GoROSEN/rosen-apiserver/features/member"
 	"github.com/google/martian/log"
 	"github.com/jinzhu/copier"
 )
 
 // RosenMemberVO 会员基础视图模型
 type RosenMemberVO struct {
-	ID            uint   `json:"id"`
-	UserName      string `json:"userName"`    // 用户名
-	DisplayName   string `json:"displayName"` // 昵称
-	Avator        string `json:"avatar"`      // 头像
-	Gender        string `json:"gender"`      // 性别
-	CellPhone     string `json:"phone"`
-	Bio           string `json:"bio"`
-	WalletAddress string `json:"walletAddress"`
-	ShareLocation bool   `json:"shareLocation"` //是否地图可见
+	ID                    uint   `json:"id"`
+	UserName              string `json:"userName"`    // 用户名
+	DisplayName           string `json:"displayName"` // 昵称
+	Avator                string `json:"avatar"`      // 头像
+	Gender                string `json:"gender"`      // 性别
+	CellPhone             string `json:"phone"`
+	Bio                   string `json:"bio"`
+	WalletAddress         string `json:"walletAddress"`
+	ShareLocation         bool   `json:"shareLocation"` //是否地图可见
+	Language              string `json:"lang"`
+	EnableChatTranslation bool   `json:"enableChatTranslaction"`
+	ChatTranslationLang   string `json:"translationLang"`
 }
 
 // MemberFullVO 会员全视图模型
 type MemberFullVO struct {
-	ID                 uint          `json:"id"`
-	UserName           string        `json:"userName"`    // 用户名
-	DisplayName        string        `json:"displayName"` // 昵称
-	Bio                string        `json:"bio"`
-	Email              string        `json:"email"`              // 电邮，脱敏输出
-	Gender             string        `json:"gender"`             // 性别
-	Avator             string        `json:"avatar"`             // 头像
-	FollowersCount     uint          `json:"followers"`          // 粉丝数量
-	FolllowingCount    uint          `json:"followings"`         // 关注数量
-	Role               string        `json:"role"`               // 角色
-	Energy             int64         `json:"energy"`             // 能量
-	TokenCoin          float64       `json:"token"`              // 罗森币
-	LockedTokenCoin    float64       `json:"tokenLocked"`        // 罗森币
-	Level              uint          `json:"level"`              // 级别
-	ShareLocation      bool          `json:"shareLocation"`      //是否地图可见
-	SysWalletAddresses []string      `json:"sysWalletAddresses"` // 系统钱包地址
-	WalletAddresses    []string      `json:"walletAddresses"`    // 用户钱包地址
-	SysWallets         []WalletVO    `json:"sysWallets"`
-	UserWallets        []WalletVO    `json:"userWallets"`
-	Assets             []AssetVO     `json:"assets"`
-	Equip              *EquipAssetVO `json:"equip,omitempty"` // 当前装备
+	ID                    uint          `json:"id"`
+	UserName              string        `json:"userName"`    // 用户名
+	DisplayName           string        `json:"displayName"` // 昵称
+	Bio                   string        `json:"bio"`
+	Email                 string        `json:"email"`              // 电邮，脱敏输出
+	Gender                string        `json:"gender"`             // 性别
+	Avator                string        `json:"avatar"`             // 头像
+	FollowersCount        uint          `json:"followers"`          // 粉丝数量
+	FolllowingCount       uint          `json:"followings"`         // 关注数量
+	Role                  string        `json:"role"`               // 角色
+	Energy                int64         `json:"energy"`             // 能量
+	Gem                   int64         `json:"gem"`                // 宝石
+	TokenCoin             float64       `json:"token"`              // 罗森币
+	LockedTokenCoin       float64       `json:"tokenLocked"`        // 罗森币
+	Level                 uint          `json:"level"`              // 级别
+	ShareLocation         bool          `json:"shareLocation"`      //是否地图可见
+	SysWalletAddresses    []string      `json:"sysWalletAddresses"` // 系统钱包地址
+	WalletAddresses       []string      `json:"walletAddresses"`    // 用户钱包地址
+	SysWallets            []WalletVO    `json:"sysWallets"`
+	UserWallets           []WalletVO    `json:"userWallets"`
+	Assets                []AssetVO     `json:"assets"`
+	Equip                 *EquipAssetVO `json:"equip,omitempty"` // 当前装备
+	Language              string        `json:"lang"`
+	EnableChatTranslation bool          `json:"enableChatTranslaction"`
+	ChatTranslationLang   string        `json:"translationLang"`
+	HasPayPassword        bool          `json:"hasPayPassword"`
 }
 
 type MemberWithEquipVO struct {
@@ -59,11 +67,14 @@ type MemberWithEquipVO struct {
 	Equip       *EquipAssetVO `json:"equip,omitempty"` // 当前装备
 }
 
-func (c *Controller) composeRosenMemberFullVO(ext *MemberExtra, sns *member.SnsSummary, energy *account.Account, rosenCoin *account.Account) *MemberFullVO {
+func (c *Controller) composeRosenMemberFullVO(ext *MemberExtra, sns *member.SnsSummary, energy *account.Account, gem *account.Account, rosenCoin *account.Account) *MemberFullVO {
 
+	if ext == nil {
+		return nil
+	}
 	m := &ext.Member
 	var avatar string
-	if strings.Index(m.Avatar, "http") >= 0 {
+	if strings.Contains(m.Avatar, "http") {
 		avatar = m.Avatar
 	} else {
 		if avatarURL, err := c.OssController.PresignedOssDownloadURLWithoutPrefix(m.Avatar); err != nil {
@@ -73,13 +84,17 @@ func (c *Controller) composeRosenMemberFullVO(ext *MemberExtra, sns *member.SnsS
 		}
 	}
 	vo := &MemberFullVO{
-		ID:          m.ID,
-		UserName:    m.UserName,
-		DisplayName: m.DisplayName,
-		Bio:         m.Bio,
-		Email:       m.Email,
-		Gender:      m.Gender,
-		Avator:      avatar,
+		ID:                    m.ID,
+		UserName:              m.UserName,
+		DisplayName:           m.DisplayName,
+		Bio:                   m.Bio,
+		Email:                 m.Email,
+		Gender:                m.Gender,
+		Avator:                avatar,
+		Language:              m.Language,
+		EnableChatTranslation: ext.EnableChatTranslation,
+		ChatTranslationLang:   ext.ChatTranslationLang,
+		HasPayPassword:        len(ext.PayPassword) > 0,
 	}
 	if sns != nil {
 		vo.FollowersCount = sns.FollowersCount
@@ -114,6 +129,9 @@ func (c *Controller) composeRosenMemberFullVO(ext *MemberExtra, sns *member.SnsS
 	}
 	if energy != nil {
 		vo.Energy = energy.Available / int64(math.Pow10(int(config.GetConfig().Rosen.Energy.Decimals)))
+	}
+	if gem != nil {
+		vo.Gem = gem.Available / int64(math.Pow10(int(config.GetConfig().Rosen.Coin2.Decimals)))
 	}
 	if rosenCoin != nil {
 		decimals := int64(config.GetConfig().Rosen.Coin.Decimals)

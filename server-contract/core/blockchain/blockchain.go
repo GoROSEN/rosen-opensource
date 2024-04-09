@@ -13,4 +13,5 @@ type BlockChainAccess interface {
 	TransferToken(from, to string, value *big.Int, contractAddress string) (string, error)
 	MintNFT(to string, contractAddress string, tokenId uint64, tokenUri string) (string, error)
 	TransferNFT(from, to string, contractAddress string, tokenId uint64) (string, error)
+	ConfirmTransaction(txhash string) (bool, error)
 }

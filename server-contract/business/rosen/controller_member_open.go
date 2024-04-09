@@ -2,13 +2,14 @@ package rosen
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"strings"
 
-	"github.com/GoROSEN/rosen-opensource/server-contract/core/config"
-	"github.com/GoROSEN/rosen-opensource/server-contract/core/utils"
-	"github.com/GoROSEN/rosen-opensource/server-contract/features/member"
+	"github.com/GoROSEN/rosen-apiserver/core/config"
+	"github.com/GoROSEN/rosen-apiserver/core/utils"
+	"github.com/GoROSEN/rosen-apiserver/features/member"
 	"github.com/gin-gonic/gin"
 	"github.com/google/martian/log"
 	"github.com/jinzhu/copier"
@@ -23,6 +24,7 @@ func (c *Controller) setupOpenMemberController(r *gin.RouterGroup) {
 func (c *Controller) signUp(ctx *gin.Context) {
 
 	log.Infof("member signup")
+	cfg := config.GetConfig()
 	var vo member.SignUpRequestVo
 	if err := ctx.ShouldBind(&vo); err != nil {
 		log.Errorf("member signup error: %v", err)
@@ -31,6 +33,18 @@ func (c *Controller) signUp(ctx *gin.Context) {
 	}
 	vo.UserName = strings.ToLower(vo.UserName)
 	vo.Email = strings.ToLower(vo.Email)
+	// verify if mail address is in the black list
+	if cfg.BlockedMails != nil {
+		for _, suffix := range cfg.BlockedMails {
+			s := "@" + suffix
+			log.Infof("%v vs %v", vo.Email, s)
+			if strings.HasSuffix(vo.Email, s) {
+				log.Errorf("member signup email %v is blocked by %v", vo.Email, s)
+				ctx.String(http.StatusBadRequest, "message.common.system-error")
+				return
+			}
+		}
+	}
 	// check mail addresss
 	if err := c.service.FindModelWhere(&member.Member{}, "user_name = ? or email = ?", vo.UserName, vo.Email); err == nil {
 		// 用户名已存在
@@ -38,7 +52,7 @@ func (c *Controller) signUp(ctx *gin.Context) {
 		utils.SendFailureResponse(ctx, 501, "message.member.email-registered")
 		return
 	}
-	if config.GetConfig().Rosen.VCode &&
+	if cfg.Rosen.VCode &&
 		vo.VCode != "EA88E1C6-ED03-4DDE-BFAD-00705C2F8A6E" { //万能验证码
 		log.Debugf("signup vo: %v", vo)
 		cmd := c.service.client.Get(fmt.Sprintf("register-code:%v", vo.Email))
@@ -55,6 +69,8 @@ func (c *Controller) signUp(ctx *gin.Context) {
 			utils.SendFailureResponse(ctx, 500, "message.member.invalid-username-verifycode")
 			return
 		}
+	} else {
+		log.Infof("skipped vcode verification")
 	}
 	obj := &member.Member{}
 	if err := copier.Copy(obj, vo); err != nil {
@@ -65,7 +81,7 @@ func (c *Controller) signUp(ctx *gin.Context) {
 	obj.UserName = strings.ToLower(obj.UserName)
 	obj.Email = strings.ToLower(obj.Email)
 	obj.Level = 1
-	obj.Avatar = "member/avatars/000000.jpg"
+	obj.Avatar = "member/avatars/000000.png"
 	obj.DisplayName = strings.Split(obj.UserName, "@")[0]
 
 	if len(vo.NewPwd) > 0 {
@@ -114,13 +130,17 @@ func (c *Controller) getLocation(ctx *gin.Context) {
 
 func (c *Controller) postSignup(obj *member.Member) error {
 
-	tokenName := config.GetConfig().Rosen.Chains[0].DefaultToken.Name
+	cfg := config.GetConfig()
 	// 创建energy
 	c.accountService.NewAccount(obj.ID, obj.UserName, "energy")
 	// c.accountService.IncreaseAvailable(energy, 1000000, "gift")
 	// 创建token账户
-	c.accountService.NewAccount(obj.ID, obj.UserName, tokenName)
-	// c.accountService.IncreaseAvailable(rosen, 10000, "gift")
+	// c.accountService.NewAccount(obj.ID, obj.UserName, tokenName)
+	// 活动2023-11-12：新用户赠0.5U
+	rosenAcc := c.accountService.NewAccount(obj.ID, obj.UserName, cfg.Rosen.Coin.TokenName)
+	c.accountService.IncreaseAvailable(rosenAcc, int64(math.Pow10(int(cfg.Rosen.Coin.Decimals))*0.5), "gift")
+	// 创建金币账户
+	c.accountService.NewAccount(obj.ID, obj.UserName, cfg.Rosen.Coin2.TokenName)
 
 	// 给默认装备
 	var suit0 Asset
