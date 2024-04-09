@@ -1,30 +1,53 @@
 import React from 'react'
 import {
   ActivityIndicator,
-  Animated,
   StyleSheet,
   View,
   Text,
   TextInput,
   Image,
-  ImageBackground,
   TouchableOpacity,
-  ScrollView,
   FlatList,
+  Pressable,
+  GestureResponderEvent,
 } from 'react-native'
 import { LinearGradient } from 'expo-linear-gradient'
+import { useTranslation } from 'react-i18next'
+import { useNavigation } from '@react-navigation/native'
+
+import { globalStyles } from '@/constants'
 import TouchIcon from '@/components/TouchIcon'
 import SvgIcon from '@/components/SvgIcon'
+
 import {
   useLazyGetFollowerListQuery,
   useLazyGetFollowingListQuery,
 } from '@/services/modules/friend'
-import { useTranslation } from 'react-i18next'
 
-function friendReducer(state, action) {
+type PageProps = {
+  /** followers: 1, followings: 2 */
+  friendType: number
+  /** 是否显示聊天图标 */
+  chat?: boolean
+  /** 切换好友选中状态 */
+  onChange?: (item?: API.UserInfo) => void
+  /** 好友点击事件 */
+  onPress: (item: API.UserInfo) => void
+}
+
+type ProducerListRequestParams = {
+  type: number
+  keyword: string
+  page: number
+}
+
+function friendReducer(
+  state: API.UserInfo[],
+  action: { type: string; payload?: API.UserInfo },
+) {
   switch (action.type) {
     case 'ADD':
-      return state.concat(action.payload)
+      return state.concat(action.payload || [])
     case 'CLEAR':
       return []
     default:
@@ -32,25 +55,52 @@ function friendReducer(state, action) {
   }
 }
 
-const List = props => {
-  const { t, i18n } = useTranslation()
+const List: React.FC<PageProps> = props => {
+  const { t } = useTranslation()
+  const navigation = useNavigation()
   const [fetchFollowerListTrigger] = useLazyGetFollowerListQuery()
   const [fetchFollowingListTrigger] = useLazyGetFollowingListQuery()
   const [friendList, dispatch] = React.useReducer(friendReducer, [])
   const queryPage = React.useRef(1)
-  const [curSelectedIndex, setCurSelectedIndex] = React.useState()
+  const [curSelectedIndex, setCurSelectedIndex] = React.useState<
+    number | null
+  >()
   const [pageLoading, setPageLoading] = React.useState(false)
   const [pageLoadingFull, setPageLoadingFull] = React.useState(false)
   const [searchKeyword, setSearchKeyword] = React.useState('')
 
-  const handleKeywordChange = React.useCallback(value => {
+  // 获取数据
+  const loadFollowerData = React.useCallback(
+    (params: ProducerListRequestParams) => {
+      const trigger =
+        params.type === 1 ? fetchFollowerListTrigger : fetchFollowingListTrigger
+      setPageLoading(true)
+      trigger({ page: params.page, keyword: params.keyword }).then(result => {
+        setPageLoading(false)
+        if (params.page >= result.data.pager.pageCount) {
+          setPageLoadingFull(true)
+        } else {
+          setPageLoadingFull(false)
+        }
+        dispatch({ type: 'ADD', payload: result.data.items })
+      })
+    },
+    [fetchFollowerListTrigger, fetchFollowingListTrigger],
+  )
+
+  const handleChat = (e: GestureResponderEvent, id: number) => {
+    e.stopPropagation()
+    navigation.navigate('ChatP2P', { id: id })
+  }
+
+  const handleKeywordChange = React.useCallback((value: string) => {
     setSearchKeyword(value)
   }, [])
 
   // 搜索
   const handleSearch = React.useCallback(() => {
     // 清空选中的好友
-    setCurSelectedIndex()
+    setCurSelectedIndex(null)
     props.onChange && props.onChange()
 
     // 将分页重置为1
@@ -69,7 +119,7 @@ const List = props => {
 
   // 切换好友选中状态
   const toggleSelect = React.useCallback(
-    index => {
+    (index: number) => {
       if (props.onChange) {
         if (curSelectedIndex === index) {
           setCurSelectedIndex(null)
@@ -85,26 +135,6 @@ const List = props => {
       }
     },
     [curSelectedIndex, friendList, props],
-  )
-
-  // 获取数据
-  const loadFollowerData = React.useCallback(
-    params => {
-      const trigger =
-        params.type === 1 ? fetchFollowerListTrigger : fetchFollowingListTrigger
-      setPageLoading(true)
-      trigger({ page: params.page, keyword: params.keyword }).then(result => {
-        setPageLoading(false)
-        console.log(result)
-        if (params.page >= result.data.pager.pageCount) {
-          setPageLoadingFull(true)
-        } else {
-          setPageLoadingFull(false)
-        }
-        dispatch({ type: 'ADD', payload: result.data.items })
-      })
-    },
-    [fetchFollowerListTrigger, fetchFollowingListTrigger],
   )
 
   // 上拉加载更多数据
@@ -128,7 +158,7 @@ const List = props => {
 
   React.useEffect(() => {
     // 清空选中的好友
-    setCurSelectedIndex()
+    setCurSelectedIndex(null)
     props.onChange && props.onChange()
 
     // 将分页重置为1
@@ -185,20 +215,20 @@ const List = props => {
             style={styles.searchInput}
             onChangeText={handleKeywordChange}
             onSubmitEditing={handleSearch}
-            placeholder={t('page.mint.friend.search')}
+            placeholder={t('page.mint.friend.search') as string}
             placeholderTextColor="rgba(255,255,255,0.2)"
           />
           <TouchIcon
             iconName="search"
             iconSize={24}
             onPress={handleSearch}
-            style={[styles.searchIcon]}
+            style={styles.searchIcon}
           />
         </View>
       }
       renderItem={({ item, index }) => (
         <TouchableOpacity
-          style={styles.resultItem}
+          style={[globalStyles.flexRowSpace, styles.resultItem]}
           activeOpacity={1}
           key={item.id}
           onPress={() => {
@@ -213,11 +243,30 @@ const List = props => {
               style={styles.resultItemLinearGradientBg}
             />
           )}
-          <Image
-            source={{ uri: `${item.avatar}?x-oss-process=style/p_20` }}
-            style={styles.userAvatar}
-          />
-          <Text style={styles.userName}>{item.displayName}</Text>
+          <View style={styles.userInfo}>
+            <Image
+              source={{ uri: `${item.avatar}?x-oss-process=style/p_20` }}
+              style={styles.userAvatar}
+            />
+            <Text
+              style={styles.userName}
+              numberOfLines={1}
+              ellipsizeMode="tail"
+            >
+              {item.displayName}
+            </Text>
+          </View>
+
+          {props.chat && (
+            <Pressable
+              hitSlop={20}
+              onPress={e => {
+                handleChat(e, item.id)
+              }}
+            >
+              <SvgIcon iconName="chat" iconSize={18} />
+            </Pressable>
+          )}
         </TouchableOpacity>
       )}
       ListFooterComponent={listFooter}
@@ -260,6 +309,11 @@ const styles = StyleSheet.create({
     right: 0,
     top: 0,
     bottom: 0,
+  },
+  userInfo: {
+    width: '80%',
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   userAvatar: {
     width: 40,

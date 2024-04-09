@@ -1,13 +1,20 @@
 import React from 'react'
 import { View, StyleSheet, Text, TouchableOpacity } from 'react-native'
-import List from './List'
 import { useTranslation } from 'react-i18next'
+import List from './FollowListCore'
 
-const Friends = props => {
+type PageProps = {
+  /** 切换好友选中状态 */
+  onChange?: (item?: API.UserInfo) => void
+  /** 好友点击事件 */
+  onPress: (item: API.UserInfo) => void
+}
+
+const FollowListGroup: React.FC<PageProps> = props => {
   const [friendType, setFriendType] = React.useState(1)
-  const { t, i18n } = useTranslation()
+  const { t } = useTranslation()
   // 切换好友类型
-  const toggleFriendType = type => {
+  const toggleFriendType = (type: number) => {
     setFriendType(type)
   }
 
@@ -17,7 +24,7 @@ const Friends = props => {
         <TouchableOpacity
           style={[
             styles.switchItem,
-            friendType === 1 ? styles.switchItemActive : '',
+            friendType === 1 ? styles.switchItemActive : null,
           ]}
           onPress={() => {
             toggleFriendType(1)
@@ -26,7 +33,7 @@ const Friends = props => {
           <Text
             style={[
               styles.switchItemText,
-              friendType === 1 ? styles.switchItemTextActive : '',
+              friendType === 1 ? styles.switchItemTextActive : null,
             ]}
           >
             {t('page.common.followers')}
@@ -35,7 +42,7 @@ const Friends = props => {
         <TouchableOpacity
           style={[
             styles.switchItem,
-            friendType === 2 ? styles.switchItemActive : '',
+            friendType === 2 ? styles.switchItemActive : null,
           ]}
           onPress={() => {
             toggleFriendType(2)
@@ -44,7 +51,7 @@ const Friends = props => {
           <Text
             style={[
               styles.switchItemText,
-              friendType === 2 ? styles.switchItemTextActive : '',
+              friendType === 2 ? styles.switchItemTextActive : null,
             ]}
           >
             {t('page.common.followings')}
@@ -92,4 +99,4 @@ const styles = StyleSheet.create({
   },
 })
 
-export default React.memo(Friends)
+export default React.memo(FollowListGroup)
