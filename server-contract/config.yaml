@@ -114,4 +114,22 @@ rosen:
       defaultNFT:
         name: ROSEN
         contractAddress: 0x27f14Ea24C9B76b0721A41a97f7Eebc297223Be5
-      
+    - name: ethereum
+      endpoint: https://blockchain.googleapis.com/v1/projects/rosenbridge-72a9d/locations/us-central1/endpoints/ethereum-holesky/rpc?key=...
+      funder: private-key 
+      unlockPhrase:
+      gasPrice: 30000000000
+      defaultToken:
+        name: pyusdt
+        contractAddress: 0x6c3ea9036406852006290770BEdFcAbA0e23A0e8
+        autoCreate: false
+        decimals: 6
+      tokens:
+        - name: pyusd
+          accountType: usdt
+          contractAddress: 0x6c3ea9036406852006290770bedfcaba0e23a0e8
+          autoCreate: false
+          decimals: 6
+      defaultNFT:
+        name: ROSEN
+        contractAddress: 0x27f14ea24c9b76b0721a41a97f7eebc297223be5
